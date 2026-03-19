@@ -18,6 +18,8 @@ seuil = 0.0001
 def segmente(path) : 
     '''
     découpe le corpus (les titres et les textes) en tokens.
+    arguments: 
+
     '''
     # utilisant un dictionnaire embarqué pour stocker les tokens dans chaque document, 
     # et leurs fréquences pour chaque document
@@ -34,12 +36,6 @@ def segmente(path) :
         texte = doc.find('texte').text
         doc_nlp = nlp(titre + ' ' + texte)
         tokens = [token.text.lower() for token in doc_nlp if not token.is_space and not token.is_punct]
-        mot_lemma_dict = {}
-        with open("TD3/mot_lemma_list.txt", 'r', encoding = "utf-8") as f:
-            for line in f :
-                mot, lemma = line.strip().split('\t')
-                mot_lemma_dict[mot] = lemma
-        tokens = [mot_lemma_dict.get(token, token) for token in tokens]
         
         #tokens = re.findall(r'\b\w+\b', titre + ' ' + texte)
 

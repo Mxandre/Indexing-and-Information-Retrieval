@@ -1,5 +1,68 @@
 import xml.etree.ElementTree as ET
 import spacy
+import nltk
+from nltk.stem.snowball import SnowballStemmer
+from nltk.tokenize import word_tokenize
+from collections import Counter, defaultdict
+
+# Téléchargement du modèle de tokenisation de NLTK
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('punkt_tab')
+
+def analyser_snowball(chemin_xml, chemin_sortie_csv):
+    """
+    Analyse un fichier XML en utilisant le Snowball Stemmer pour extraire les racines des mots.
+    Les résultats sont écrits dans un fichier txt avec deux colonnes : "Mot" et "Racine".
+    Args:
+        chemin_xml (str): Le chemin vers le fichier XML à analyser.
+        chemin_sortie_csv (str): Le chemin vers le fichier CSV de sortie.
+    Returns:
+        stats_racines (Counter): Un compteur des racines de mots et de leur fréquence.
+        nombre_total_mots (int): Le nombre total de mots analysés.
+    """
+    stemmer = SnowballStemmer("french")
+    
+    # Analyse du fichier XML et extraction des textes
+    try:
+        arbre = ET.parse(chemin_xml)
+        racine = arbre.getroot()
+    except Exception as e:
+        print(f"Erreur XML : {e}")
+        return Counter(), 0
+
+    textes_extraits = []
+    for doc in racine.findall('document'):
+        titre = getattr(doc.find('titre'), 'text', '') or ""
+        texte = getattr(doc.find('texte'), 'text', '') or ""
+        textes_extraits.append(titre + " " + texte)
+
+    # Tokenisation des textes 
+    texte_complet = " ".join(textes_extraits)
+    mots = word_tokenize(texte_complet, language='french')
+
+    # Statistiques des racines et nombre total de mots
+    stats_racines = Counter()
+    nombre_total_mots = 0
+
+    with open("mot_racine.txt", mode="w", encoding="utf-8", newline="") as f:
+        for mot in mots:
+            if mot.isalnum():
+                mot_minuscule = mot.lower()
+                racine_mot = stemmer.stem(mot_minuscule)
+                
+                # Écriture dans le fichier de sortie
+                f.write(f"{mot}\t{racine_mot}\n")
+                
+                # Mise à jour des statistiques
+                stats_racines[racine_mot] += 1
+                nombre_total_mots += 1
+
+    return stats_racines, nombre_total_mots
+
 
 def extract_mot_lemma_from_xml(xml_file):
     nlp = spacy.load('fr_core_news_sm')
