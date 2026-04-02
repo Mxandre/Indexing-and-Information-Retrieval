@@ -19,7 +19,7 @@ def segmente(path) :
     '''
     découpe le corpus (les titres et les textes) en tokens.
     arguments: 
-
+        Path: le chemin du fichier XML à traiter
     '''
     # utilisant un dictionnaire embarqué pour stocker les tokens dans chaque document, 
     # et leurs fréquences pour chaque document
