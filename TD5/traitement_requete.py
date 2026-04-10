@@ -2,6 +2,11 @@ import re
 import unicodedata
 from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+import csv
+import pickle
+import spacy
+import heapq
 
 
 MONTH = r"janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre"
@@ -44,19 +49,60 @@ PATTERNS = {
     "op": OP_PATTERN,
 }
 
+LEMMATISATION_FILE = Path("TD3/mot_lemma_list.txt")
+PICKELE_LEMMA_FILE = Path("TD5/lemma_dict.pkl")
+TF_IDF_FILE = Path("TD3/tf-idf.txt")
+PICKLE_TF_IDF_FILE = Path("TD5/tf-idf.pkl")
+ANTI_DICT_FILE = Path("TD3/anti_dict.txt")
+PICKLE_ANTI_LIST = Path("TD5/anti_list.pkl")
+
+nlp = spacy.load("fr_core_news_sm")
+
+def load_lemmatisatioin_file():
+    lemma_dict = {}
+    with open(LEMMATISATION_FILE, "r", encoding = "utf-8") as file:
+        reader = csv.reader(file, delimiter = "\t")
+        for raw in reader :
+            if raw is not None or len(raw) < 2:
+                inflection = raw[0].strip()
+                word = raw[1].strip()
+                lemma_dict[inflection] = word
+        with open(PICKELE_LEMMA_FILE, "wb") as file:
+            pickle.dump(lemma_dict, file)
+    content = TF_IDF_FILE.read_text(encoding = "utf-8")
+    lines = content.split()
+    word_tf_idf = {}
+
+    for i in range(0, len(lines), 2):
+        word = lines[i]
+        tf_idf = float(lines[i+1])
+        word_tf_idf[word] = tf_idf
+    with open(PICKLE_TF_IDF_FILE, "wb") as file:
+        pickle.dump(word_tf_idf, file)
+    content = ANTI_DICT_FILE.read_text(encoding = "utf-8")
+    lines = content.split()
+    anti_word = []
+
+    for i in range(0, len(lines), 2):
+        word = lines[i]
+        anti_word.append(word)
+    with open(PICKLE_ANTI_LIST, "wb") as file :
+        pickle.dump(anti_word, file)
+
+        
 
 def normaliser_texte(source: str) -> str:
-    source = unicodedata.normalize("NFKD", source)
-    source = "".join(ch for ch in source if not unicodedata.combining(ch))
     source = source.replace("?", " ")
     source = re.sub(r"\s+", " ", source)
+    source = source.lower()
+
     return source.strip()
 
 
-def pipeline_traitement_requete(source: str, metadonnees: dict) -> dict:
+def pipeline_traitement_requete(source: str, metadonnees: dict, tf_idf_dict, anti_list) -> dict:
     metadonnees = traiter_metadonnees(source, metadonnees)
     metadonnees = traiter_op_logique(source, metadonnees)
-    metadonnees = traiter_mots_cles(source, metadonnees)
+    metadonnees = traiter_mots_cles(source, metadonnees, tf_idf_dict, anti_list)
     return metadonnees
 
 
@@ -118,6 +164,7 @@ def traiter_metadonnees(source: str, metadonnees: defaultdict) -> dict:
     rubrique = PATTERNS["rubrique"].search(source_normalisee)
     if rubrique:
         metadonnees["rubrique"] = rubrique.group("rubrique")
+    metadonnees = traiter_op_logique(source_normalisee, metadonnees)
 
     return metadonnees
 
@@ -131,7 +178,29 @@ def traiter_op_logique(source: str, metadonnees: dict) -> dict:
     return metadonnees
 
 
-def traiter_mots_cles(source: str, metadonnees: dict) -> dict:
+def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list) -> dict:
+    heap : list[set] = []
+    
+    doc = nlp(source)
+
+    for token in doc:
+        word_lemma = token.lemma_.lower()
+
+        if word_lemma in anti_list or not token.is_alpha:
+            continue
+
+        if token in anti_list : 
+            continue
+
+        try:
+            tf_idf = tf_idf_dict[word_lemma]
+        except KeyError as err:
+            print(f"the word {word_lemma} not in TF_IDF file")
+            continue
+        heapq.heappush(heap, (word_lemma, tf_idf)) ## here, python default is min-heap
+    top_3 = heapq.nlargest(3, heap, key = lambda x : x[1])
+    for (word,_) in top_3:
+        metadonnees["key_word"].append(word)
     return metadonnees
 
 
@@ -152,29 +221,23 @@ def extraire_request(file_path: Path) -> list[str]:
 
 
 if __name__ == "__main__":
-    import json
-
+    
     file_name = Path(__file__).parent / "requete.txt"
+    load_lemmatisatioin_file()
 
     with open(file_name, "r", encoding="utf-8") as f:
         requests = f.readlines()
-
-    print("=" * 60)
-    print(" RÉSULTATS D'ANALYSE DES REQUÊTES ".center(60, "="))
-    print("=" * 60)
-
+    with open(PICKLE_TF_IDF_FILE, 'rb') as file:
+        tf_idf_dict = pickle.load(file)
+    with open(PICKLE_ANTI_LIST, "rb") as file :
+        anti_list = pickle.load(file)
+    
     for request in requests:
-        request_clean = request.strip()
-        if not request_clean:
-            continue
-
-        metadonnees = defaultdict(list)
-        # Utilisation du pipeline complet au lieu de seulement traiter_metadonnees
-        metadonnees = pipeline_traitement_requete(request_clean, metadonnees)
+        metadonnes = defaultdict(list)
+        request_normalisee = normaliser_texte(request)
+        metadonnes = pipeline_traitement_requete(request_normalisee, metadonnes, tf_idf_dict, anti_list)
         
-        if metadonnees:
-            req_ascii = request_clean.encode("utf-8", errors="backslashreplace").decode("utf-8")
-            print(f"\nRequête : {req_ascii}")
-            print("Résultats :")
-            print(json.dumps(dict(metadonnees), indent=4, ensure_ascii=False))
-            print("-" * 60)
+        if len(metadonnes.keys()) >= 1:
+            print(request.strip())
+            # print(request.strip().encode("ascii", errors="backslashreplace").decode("ascii"))
+            print("the result obtained is", dict(metadonnes))
