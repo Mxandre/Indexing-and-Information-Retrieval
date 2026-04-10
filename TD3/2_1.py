@@ -1,12 +1,14 @@
 import xml.etree.ElementTree as ET
+import math
 from collections import Counter, defaultdict
 import re, glob
 from math import log
+from pathlib import Path
 import spacy
 
-
-path_xml = 'TD2/corpus_filtre.xml'
-path_root = '/Users/lipengcheng/Programming/py/LO17/'
+BASE_DIR = Path(__file__).resolve().parent
+path_xml = BASE_DIR / '../TD2/corpus.xml'
+path_root = BASE_DIR.parent / 'TD3'
 
 # seuil pour filtrer les tokens à inclure dans l'anti-dictionnaire
 seuil = 0.0001
@@ -54,8 +56,8 @@ def tf_idf(Dict):
 
     for num, counter in Dict.items():
         for token, count in counter.items():
-            tf = count
-            idf = log(len(Dict) / idfs[token])
+            tf = 1 + log(count,10)
+            idf = log(len(Dict) / idfs[token],10)
             tf_idf_score = tf * idf
             Dict[num][token] = tf_idf_score
     

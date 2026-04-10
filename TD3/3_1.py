@@ -26,30 +26,18 @@ def create_inverse_index(file_xml):
                 for lemma in text_lemmas:
                     inverse_index[lemma][doc_id][zone] += 1
                     
-                    
-
-        # champs, metadonnees
-        # methode Multi-field Indexing, on considereExact Zone et Tokenized Zone
-        champs = ['auteur', 'date', 'rubrique']
+        # champs, metadonnees : pas de nlp, juste zone exacte
+        champs = ['auteur', 'date', 'rubrique', 'article']
         for champ in champs:
             node = doc.find(champ)
             if node is not None and node.text and node.text.strip():
-                 content = node.text
+                content = node.text
+                # exact zone
+                inverse_index[content.lower().strip()][doc_id][champ] += 1
 
-                 if champ == 'date':
-                    inverse_index[content.strip()][doc_id][champ] += 1  # nom du champ faut etre different?
-                    YDM = re.split(r'[-/]', content.strip())    
-                    for d in YDM:
-                        inverse_index[d][doc_id][champ] += 1
-                 else:
-                    # exact zone
-                    inverse_index[content.lower().strip()][doc_id][champ] += 1
-                    # tokenized zone
-                    tokens = content.replace('-', ' ').replace('_', ' ').split()
-                    for token in tokens:
-                        if token.isalnum():
-                            inverse_index[token.lower().strip()][doc_id][champ] += 1
-
+        # presence des images : Index particulier pour la existence d'une image dans le document
+        if doc.find('images') is not None:
+            inverse_index['has_image'][doc_id]['image'] += 1
     return inverse_index
 
 if __name__ == "__main__":

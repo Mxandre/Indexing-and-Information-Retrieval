@@ -4,7 +4,7 @@ from pathlib import Path
 from collections import defaultdict
 
 
-MONTH = r"janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre"
+MONTH = r"janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre"
 DMY_PATTERN_NUMERO = r"\b(?P<day>\d{1,2})[/\-\s]+(?P<month>\d{1,2})[/\-\s]+(?P<year>\d{4})\b"
 DMY_PATTERN_TEXTE = rf"\b(?P<day>\d{{1,2}})\s+(?P<month_name>{MONTH})\s+(?P<year>\d{{4}})\b"
 MY_PATTERN = r"\b(?P<month>\d{1,2})[/\-\s]+(?P<year>\d{4})\b"
@@ -152,14 +152,29 @@ def extraire_request(file_path: Path) -> list[str]:
 
 
 if __name__ == "__main__":
+    import json
+
     file_name = Path(__file__).parent / "requete.txt"
 
     with open(file_name, "r", encoding="utf-8") as f:
         requests = f.readlines()
 
+    print("=" * 60)
+    print(" RÉSULTATS D'ANALYSE DES REQUÊTES ".center(60, "="))
+    print("=" * 60)
+
     for request in requests:
-        metadonnes = defaultdict(list)
-        metadonnes = traiter_metadonnees(request, metadonnes)
-        if len(metadonnes.keys()) >= 1:
-            print(request.strip().encode("ascii", errors="backslashreplace").decode("ascii"))
-            print("the result obtained is", dict(metadonnes))
+        request_clean = request.strip()
+        if not request_clean:
+            continue
+
+        metadonnees = defaultdict(list)
+        # Utilisation du pipeline complet au lieu de seulement traiter_metadonnees
+        metadonnees = pipeline_traitement_requete(request_clean, metadonnees)
+        
+        if metadonnees:
+            req_ascii = request_clean.encode("utf-8", errors="backslashreplace").decode("utf-8")
+            print(f"\nRequête : {req_ascii}")
+            print("Résultats :")
+            print(json.dumps(dict(metadonnees), indent=4, ensure_ascii=False))
+            print("-" * 60)

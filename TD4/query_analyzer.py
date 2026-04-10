@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 import unicodedata
@@ -26,20 +25,24 @@ NUMBER_PATTERN = re.compile(r"^\d+(?:[.,]\d+)?$")
 
 
 def strip_accents(text: str) -> str:
+    '''Supprime les accents d'une chaîne de caractères.'''
     normalized = unicodedata.normalize("NFKD", text)  ## transform the accent to unicode data
     return "".join(char for char in normalized if not unicodedata.combining(char)) ## combining to recognize if it is a adding unicode data
 
 
 def normalize(text: str) -> str:
+    '''Normalise un token en supprimant les accents, en le mettant en minuscules et en remplaçant les apostrophes.'''
     text = text.strip().lower().replace("’", "'")
     return strip_accents(text)
 
 
 def tokenize(text: str) -> list[str]:
+    '''Tokenise une chaîne de caractères en utilisant une expression régulière.'''
     return TOKEN_PATTERN.findall(text.replace("’", "'"))
 
 
 def common_prefix_length(left: str, right: str) -> int:
+    '''Calcule la longueur du préfixe commun entre deux chaînes de caractères.'''
     limit = min(len(left), len(right))
     size = 0
     while size < limit and left[size] == right[size]:
@@ -48,6 +51,7 @@ def common_prefix_length(left: str, right: str) -> int:
 
 
 def levenshtein_distance(left: str, right: str) -> int:
+    '''Calcule la distance de Levenshtein entre deux chaînes de caractères.'''
     if left == right:
         return 0
     if not left:
@@ -68,10 +72,12 @@ def levenshtein_distance(left: str, right: str) -> int:
 
 
 def is_specific_entity(token: str) -> bool:
+    '''Vérifie si un token est une entité spécifique : une date ou un nombre.'''
     return bool(DATE_PATTERN.match(token) or NUMBER_PATTERN.match(token))
 
 
 def safe_spacy_tokenize_and_lemmatize(text: str) -> list[tuple[str, str]]:
+    '''Tokenise et lemmatise une chaîne de caractères en utilisant Spacy.'''
     try:
         import spacy  # type: ignore
 
@@ -103,6 +109,7 @@ class Lexicon:
 
     @classmethod
     def from_tsv(cls, path: Path) -> "Lexicon":
+        '''Charge un lexique à partir d'un fichier TSV contenant des paires mot<tab>lemme.'''
         lemma_votes: dict[str, Counter[str]] = defaultdict(Counter)
         with path.open("r", encoding="utf-8") as handle:
             for raw_line in handle:
@@ -123,6 +130,7 @@ class Lexicon:
         return normalize(token) in self.entries
 
     def lemma_for(self, token: str) -> str | None:
+        '''Retourne le lemme d'un token s'il est présent dans le lexique, sinon None.'''
         return self.entries.get(normalize(token))
 
     def generate_candidates(
@@ -132,6 +140,9 @@ class Lexicon:
         seuil_max: int,
         seuil_proximite: float,
     ) -> list[Candidate]:
+        '''Génère une liste de candidats de correction 
+        pour un token donné en fonction de prefixe commun, distance de Levenshtein et seuils.'''
+
         normalized_token = normalize(token)
         token_length = len(normalized_token)
         if not normalized_token:
@@ -168,6 +179,10 @@ def analyze_query(
     seuil_max: int,
     seuil_proximite: float,
 ) -> list[dict[str, object]]:
+    '''Analyse une requete en validant et corrigeant 
+    les tokens en utilisant un lexique et des seuils de correction.'''
+
+    # tokenisation et lemmatisation
     spacy_tokens = safe_spacy_tokenize_and_lemmatize(query)
     if spacy_tokens:
         tokens = [token for token, _lemma in spacy_tokens]
@@ -192,6 +207,7 @@ def analyze_query(
             )
             continue
 
+        # Vérification directe dans le lexique
         direct_lemma = lexicon.lemma_for(token)
         if direct_lemma is not None:
             results.append(
@@ -205,12 +221,15 @@ def analyze_query(
             )
             continue
 
+        # Si un mot n'est pas dans le lexique et n'est pas une entité spécifique, 
+        # #générer des candidats de correction
         candidates = lexicon.generate_candidates(
             token=token,
             seuil_min=seuil_min,
             seuil_max=seuil_max,
             seuil_proximite=seuil_proximite,
         )
+
         if not candidates:
             results.append(
                 {
@@ -246,6 +265,7 @@ def analyze_query(
 
 
 def format_results(results: Iterable[dict[str, object]]) -> str:
+    '''Formate les résultats en une chaîne de caractères.'''
     lines = []
     for result in results:
         token = str(result["token"])
@@ -259,72 +279,39 @@ def format_results(results: Iterable[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Analyse, valide et corrige les termes d'une requete."
-    )
-    parser.add_argument(
-        "--lexicon",
-        choices=["mini", "full"],
-        default="full",
-        help="Choisit le petit lexique manuel ou le lexique complet du corpus ADIT.",
-    )
-    parser.add_argument(
-        "--lexicon-path",
-        type=Path,
-        help="Chemin personnalise vers un fichier TSV mot<lemma>.",
-    )
-    parser.add_argument("--query", help="Requete a analyser sans saisie interactive.")
-    parser.add_argument("--seuilMin", type=int, default=2, help="Longueur minimale du prefixe commun.")
-    parser.add_argument("--seuilMax", type=int, default=3, help="Difference maximale de longueur.")
-    parser.add_argument(
-        "--seuilProximite",
-        type=float,
-        default=0.4,
-        help="Ratio minimal du prefixe commun par rapport au mot le plus court.",
-    )
-    return parser
-
-
-def resolve_lexicon_path(args: argparse.Namespace) -> Path:
-    if args.lexicon_path:
-        return args.lexicon_path.resolve()
-    if args.lexicon == "full":
-        return DEFAULT_FULL_LEXICON
-    return DEFAULT_MINI_LEXICON
-
-
 def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    lexicon_path = resolve_lexicon_path(args)
+    # Utiliser le lexique complet par défaut pour les tests
+    lexicon_path = DEFAULT_FULL_LEXICON
 
     if not lexicon_path.exists():
         print(f"Lexique introuvable: {lexicon_path}", file=sys.stderr)
         return 1
 
+    print(f"Chargement du lexique depuis : {lexicon_path}...")
     lexicon = Lexicon.from_tsv(lexicon_path)
-    query = args.query or input("Saisissez une requete : ").strip()
-    if not query:
-        print("Aucune requete saisie.", file=sys.stderr)
-        return 1
 
-    results = analyze_query(
-        query=query,
-        lexicon=lexicon,
-        seuil_min=args.seuilMin,
-        seuil_max=args.seuilMax,
-        seuil_proximite=args.seuilProximite,
-    )
+    # Paramètres par défaut codés en dur
+    seuil_min = 2
+    seuil_max = 3
+    seuil_proximite = 0.4
 
-    print(f"Lexique charge : {lexicon.source}")
-    print(
-        "Parametres prefixe : "
-        f"seuilMin={args.seuilMin}, seuilMax={args.seuilMax}, seuilProximite={args.seuilProximite}"
-    )
-    print(f"Requete : {query}")
-    print("Resultats :")
-    print(format_results(results))
+    while True:
+        query = input("\nSaisissez une requete (ou Entrée pour quitter) : ").strip()
+        if not query:
+            break
+
+        results = analyze_query(
+            query=query,
+            lexicon=lexicon,
+            seuil_min=seuil_min,
+            seuil_max=seuil_max,
+            seuil_proximite=seuil_proximite,
+        )
+
+        print(f"\n--- Résultats pour : '{query}' ---")
+        print(format_results(results))
+        print("-" * 50)
+
     return 0
 
 
