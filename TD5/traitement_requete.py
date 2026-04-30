@@ -8,6 +8,9 @@ import pickle
 import spacy
 import heapq
 
+KEYWORD_GAP_THRESHOLD = 0.35
+KEYWORD_MIN_SCORE = 1.5
+MAX_KEYWORDS = 5
 
 MONTH = r"janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre"
 DMY_PATTERN_NUMERO = r"\b(?P<day>\d{1,2})[/\-\s]+(?P<month>\d{1,2})[/\-\s]+(?P<year>\d{4})\b"
@@ -91,18 +94,27 @@ def load_lemmatisatioin_file():
 
         
 
-def normaliser_texte(source: str) -> str:
+def normaliser_texte(source: str, key_word_traite = False) -> str:
     source = source.replace("?", " ")
     source = re.sub(r"\s+", " ", source)
+    
+    words = re.findall(r"\b\w+\b", source)
+    key_word = []
+    if key_word_traite:
+        for word in words :
+            if any(c.isalpha() for c in word) and word.isupper():
+                key_word.append(word)
     source = source.lower()
+    if key_word_traite:
+        return source.strip(), key_word
+    else:
+        return source.strip()
 
-    return source.strip()
 
-
-def pipeline_traitement_requete(source: str, metadonnees: dict, tf_idf_dict, anti_list) -> dict:
+def pipeline_traitement_requete(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
     metadonnees = traiter_metadonnees(source, metadonnees)
     metadonnees = traiter_op_logique(source, metadonnees)
-    metadonnees = traiter_mots_cles(source, metadonnees, tf_idf_dict, anti_list)
+    metadonnees = traiter_mots_cles(source, metadonnees, tf_idf_dict, anti_list,upper_key_word)
     return metadonnees
 
 
@@ -178,8 +190,30 @@ def traiter_op_logique(source: str, metadonnees: dict) -> dict:
     return metadonnees
 
 
-def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list) -> dict:
-    heap : list[set] = []
+def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list[str]:
+    if not candidats:
+        return []
+
+    candidats_tries = sorted(candidats, key=lambda x: x[1], reverse=True)
+    meilleur_score = candidats_tries[0][1]
+    if meilleur_score < KEYWORD_MIN_SCORE:
+        return []
+
+    selection = [candidats_tries[0][0]]
+
+    for i in range(1, min(len(candidats_tries), MAX_KEYWORDS)):
+        score_precedent = candidats_tries[i - 1][1]
+        score_courant = candidats_tries[i][1]
+        if score_precedent - score_courant > KEYWORD_GAP_THRESHOLD:
+            break
+        selection.append(candidats_tries[i][0])
+
+    return selection
+
+
+def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
+    heap: list[tuple[str, float]] = []
+    meilleurs_scores: dict[str, float] = {}
     
     doc = nlp(source)
 
@@ -197,10 +231,28 @@ def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list) ->
         except KeyError as err:
             print(f"the word {word_lemma} not in TF_IDF file")
             continue
-        heapq.heappush(heap, (word_lemma, tf_idf)) ## here, python default is min-heap
-    top_3 = heapq.nlargest(3, heap, key = lambda x : x[1])
-    for (word,_) in top_3:
-        metadonnees["key_word"].append(word)
+
+        ancien_score = meilleurs_scores.get(word_lemma)
+        if ancien_score is None or tf_idf > ancien_score:
+            meilleurs_scores[word_lemma] = tf_idf
+
+    for mot, score in meilleurs_scores.items():
+        heapq.heappush(heap, (mot, score))
+
+    candidats = heapq.nlargest(len(heap), heap, key=lambda x: x[1])
+    keywords = selectionner_keywords_dynamiques(candidats)
+
+    deja_vus = set()
+    for word in keywords:
+        if word not in deja_vus:
+            metadonnees["key_word"].append(word)
+            deja_vus.add(word)
+
+    for word in upper_key_word:
+        mot_normalise = word.lower()
+        if mot_normalise not in deja_vus:
+            metadonnees["key_word"].append(mot_normalise)
+            deja_vus.add(mot_normalise)
     return metadonnees
 
 
@@ -234,8 +286,8 @@ if __name__ == "__main__":
     
     for request in requests:
         metadonnes = defaultdict(list)
-        request_normalisee = normaliser_texte(request)
-        metadonnes = pipeline_traitement_requete(request_normalisee, metadonnes, tf_idf_dict, anti_list)
+        request_normalisee, upper_key_word = normaliser_texte(request, key_word_traite=True)
+        metadonnes = pipeline_traitement_requete(request_normalisee, metadonnes, tf_idf_dict, anti_list,upper_key_word)
         
         if len(metadonnes.keys()) >= 1:
             print(request.strip())
