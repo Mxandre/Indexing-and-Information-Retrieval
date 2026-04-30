@@ -7,6 +7,7 @@ import csv
 import pickle
 import spacy
 import heapq
+import xml.etree.ElementTree as ET
 
 KEYWORD_GAP_THRESHOLD = 0.35
 KEYWORD_MIN_SCORE = 1.5
@@ -38,6 +39,7 @@ BETWEEN_Y = re.compile(
     re.IGNORECASE,
 )
 OP_PATTERN = re.compile(r"(?P<part1>.+?)\b(?P<op>et|ou|sans)\b(?P<part2>.+)", re.IGNORECASE)
+LOGICAL_OP_PATTERN = re.compile(r"\bmais\s+pas\b|\bsans\b|\bet\b|\bou\b", re.IGNORECASE)
 
 PATTERNS = {
     "dmy_numero": re.compile(DMY_PATTERN_NUMERO, re.IGNORECASE),
@@ -58,6 +60,7 @@ TF_IDF_FILE = Path("TD3/tf-idf.txt")
 PICKLE_TF_IDF_FILE = Path("TD5/tf-idf.pkl")
 ANTI_DICT_FILE = Path("TD3/anti_dict.txt")
 PICKLE_ANTI_LIST = Path("TD5/anti_list.pkl")
+RUBRIQUE_FILE = Path("TD3\corpus_filtre.xml")
 
 nlp = spacy.load("fr_core_news_sm")
 
@@ -92,7 +95,17 @@ def load_lemmatisatioin_file():
     with open(PICKLE_ANTI_LIST, "wb") as file :
         pickle.dump(anti_word, file)
 
-        
+def get_rubrique(file_xml: Path) -> list[str]:
+    tree = ET.parse(file_xml)
+    root = tree.getroot()
+    rubriques = set()
+
+    for doc in root.findall("document"):
+        elem = doc.find("rubrique")
+        if elem is not None and elem.text:
+            rubriques.add(elem.text.strip())
+    return list(rubriques)
+  
 
 def normaliser_texte(source: str, key_word_traite = False) -> str:
     source = source.replace("?", " ")
@@ -100,6 +113,7 @@ def normaliser_texte(source: str, key_word_traite = False) -> str:
     
     words = re.findall(r"\b\w+\b", source)
     key_word = []
+
     if key_word_traite:
         for word in words :
             if any(c.isalpha() for c in word) and word.isupper():
@@ -173,20 +187,52 @@ def traiter_metadonnees(source: str, metadonnees: defaultdict) -> dict:
                                 "value": y_pattern.group(0),
                             }
 
-    rubrique = PATTERNS["rubrique"].search(source_normalisee)
-    if rubrique:
-        metadonnees["rubrique"] = rubrique.group("rubrique")
-    metadonnees = traiter_op_logique(source_normalisee, metadonnees)
-
     return metadonnees
 
 
+def masquer_intervalles_temporels(source: str) -> str:
+    source_masque = source
+    for pattern_name in ["between_dmy", "between_my", "between_y"]:
+        pattern = PATTERNS[pattern_name]
+        source_masque = pattern.sub(lambda m: " " * (m.end() - m.start()), source_masque)
+    return source_masque
+
+
+def decouper_expression_logique(source: str) -> tuple[list[str], list[str]]:
+    source = source.strip()
+    if not source:
+        return [], []
+
+    source_masque = masquer_intervalles_temporels(source)
+    op_match = LOGICAL_OP_PATTERN.search(source_masque)
+    if op_match is None:
+        return [source.strip()], []
+
+    part1 = source[:op_match.start()].strip(" ,")
+    part2 = source[op_match.end():].strip(" ,")
+    operateur = op_match.group(0).lower()
+
+    parties_gauche, operateurs_gauche = decouper_expression_logique(part1)
+    parties_droite, operateurs_droite = decouper_expression_logique(part2)
+
+    return (
+        parties_gauche + parties_droite,
+        operateurs_gauche + [operateur] + operateurs_droite,
+    )
+
+
 def traiter_op_logique(source: str, metadonnees: dict) -> dict:
-    op_match = PATTERNS["op"].search(normaliser_texte(source))
-    if op_match:
-        metadonnees["operateur"] = op_match.group("op")
-        metadonnees["part1"] = op_match.group("part1").strip()
-        metadonnees["part2"] = op_match.group("part2").strip()
+    source_normalisee = normaliser_texte(source)
+    parties, operateurs = decouper_expression_logique(source_normalisee)
+
+    if operateurs:
+        metadonnees["operateurs"] = operateurs
+        metadonnees["parts"] = parties
+        metadonnees["operateur"] = operateurs[0]
+        if len(parties) >= 1:
+            metadonnees["part1"] = parties[0]
+        if len(parties) >= 2:
+            metadonnees["part2"] = parties[1]
     return metadonnees
 
 
@@ -276,6 +322,7 @@ if __name__ == "__main__":
     
     file_name = Path(__file__).parent / "requete.txt"
     load_lemmatisatioin_file()
+    rubirque_file = get_rubrique(RUBRIQUE_FILE)
 
     with open(file_name, "r", encoding="utf-8") as f:
         requests = f.readlines()
@@ -286,6 +333,9 @@ if __name__ == "__main__":
     
     for request in requests:
         metadonnes = defaultdict(list)
+        for rubrique in rubirque_file :
+            if rubrique in request :
+                metadonnes["rubrique"].append(rubrique)
         request_normalisee, upper_key_word = normaliser_texte(request, key_word_traite=True)
         metadonnes = pipeline_traitement_requete(request_normalisee, metadonnes, tf_idf_dict, anti_list,upper_key_word)
         
