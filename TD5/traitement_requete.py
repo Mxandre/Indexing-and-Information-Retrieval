@@ -39,7 +39,18 @@ BETWEEN_Y = re.compile(
     re.IGNORECASE,
 )
 OP_PATTERN = re.compile(r"(?P<part1>.+?)\b(?P<op>et|ou|sans)\b(?P<part2>.+)", re.IGNORECASE)
-LOGICAL_OP_PATTERN = re.compile(r"\bmais\s+pas\b|\bsans\b|\bet\b|\bou\b", re.IGNORECASE)
+LOGICAL_OP_PATTERN = re.compile(r"\bet\s+non\s+pas\b|\bnon\s+pas\b|\bmais\s+pas\b|\bsans\b|\bet\b|\bou\b", re.IGNORECASE)
+REQUEST_TYPE_PATTERN = re.compile(r"\b(articles?|rubriques?|bulletins?)\b", re.IGNORECASE)
+TITLE_CONTAINS_PATTERN = re.compile(
+    r"\bdont\s+le\s+titre\s+(?:contient|evoque)\s+(?:le\s+mot|les\s+mots|le\s+terme)?\s*\"?(?P<value>[^\"]+?)\"?(?:$|\b(?:et|ou|mais\s+pas|sans)\b)",
+    re.IGNORECASE,
+)
+IMAGE_PATTERN = re.compile(r"\bavec\s+des?\s+images?\b|\bavec\s+image\b|\bcontenant\s+une?\s+image\b|\bqui\s+ont\s+des?\s+images?\b", re.IGNORECASE)
+WITHOUT_IMAGE_PATTERN = re.compile(r"\bsans\s+image\b|\bsans\s+images\b", re.IGNORECASE)
+THEME_TRIGGER_PATTERN = re.compile(
+    r"\b(?:parl(?:e|ent|ant|er)\s+de|trait(?:e|ant|er)\s+de|sur|a\s+propos\s+de|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent))\b\s*(?P<theme>.+)",
+    re.IGNORECASE,
+)
 
 PATTERNS = {
     "dmy_numero": re.compile(DMY_PATTERN_NUMERO, re.IGNORECASE),
@@ -126,9 +137,13 @@ def normaliser_texte(source: str, key_word_traite = False) -> str:
 
 
 def pipeline_traitement_requete(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
+    metadonnees = traiter_type_requete(source, metadonnees)
     metadonnees = traiter_metadonnees(source, metadonnees)
-    metadonnees = traiter_op_logique(source, metadonnees)
-    metadonnees = traiter_mots_cles(source, metadonnees, tf_idf_dict, anti_list,upper_key_word)
+    source_sans_prefixe = supprimer_prefixe_avant_articles(source)
+    metadonnees["source_nettoyee"] = source_sans_prefixe
+    metadonnees = traiter_op_logique(source_sans_prefixe, metadonnees)
+    metadonnees = traiter_filtres_structurels(metadonnees)
+    metadonnees = traiter_mots_cles(source_sans_prefixe, metadonnees, tf_idf_dict, anti_list, upper_key_word)
     return metadonnees
 
 
@@ -190,6 +205,20 @@ def traiter_metadonnees(source: str, metadonnees: defaultdict) -> dict:
     return metadonnees
 
 
+def traiter_type_requete(source: str, metadonnees: dict) -> dict:
+    match = REQUEST_TYPE_PATTERN.search(source)
+    if match is not None:
+        metadonnees["request_type"] = match.group(1).lower()
+    return metadonnees
+
+
+def supprimer_prefixe_avant_articles(source: str) -> str:
+    match = re.search(r"\barticles?\b", source, re.IGNORECASE)
+    if match is None:
+        return source.strip()
+    return source[match.end():].strip(" ,")
+
+
 def masquer_intervalles_temporels(source: str) -> str:
     source_masque = source
     for pattern_name in ["between_dmy", "between_my", "between_y"]:
@@ -225,14 +254,96 @@ def traiter_op_logique(source: str, metadonnees: dict) -> dict:
     source_normalisee = normaliser_texte(source)
     parties, operateurs = decouper_expression_logique(source_normalisee)
 
+    metadonnees["parts"] = parties if parties else [source_normalisee]
     if operateurs:
         metadonnees["operateurs"] = operateurs
-        metadonnees["parts"] = parties
         metadonnees["operateur"] = operateurs[0]
-        if len(parties) >= 1:
-            metadonnees["part1"] = parties[0]
-        if len(parties) >= 2:
-            metadonnees["part2"] = parties[1]
+    if len(metadonnees["parts"]) >= 1:
+        metadonnees["part1"] = metadonnees["parts"][0]
+    if len(metadonnees["parts"]) >= 2:
+        metadonnees["part2"] = metadonnees["parts"][1]
+    return metadonnees
+
+
+def nettoyer_valeur_extraite(value: str) -> str:
+    value = value.strip(" ,\"'")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def extraire_theme_depuis_part(partie: str) -> str | None:
+    partie = partie.strip()
+    if not partie:
+        return None
+
+    partie = re.sub(r"^(?:non\s+pas|pas)\s+", "", partie, flags=re.IGNORECASE)
+
+    match = THEME_TRIGGER_PATTERN.search(partie)
+    if match is not None:
+        theme = nettoyer_valeur_extraite(match.group("theme"))
+        theme = re.sub(r"^(du|de la|de l|des|d)\s+", "", theme)
+        return theme if theme else None
+
+    match_simple = re.search(r"\b(?:de|du|de la|de l|des)\s+(.+)$", partie, re.IGNORECASE)
+    if match_simple is not None:
+        theme = nettoyer_valeur_extraite(match_simple.group(1))
+        return theme if theme else None
+
+    return nettoyer_valeur_extraite(partie)
+
+
+def traiter_filtres_structurels(metadonnees: dict) -> dict:
+    parts = metadonnees.get("parts", [])
+    operateurs = metadonnees.get("operateurs", [])
+    parts_restantes = []
+    themes = []
+    themes_exclus = []
+    titres = []
+
+    for i, part in enumerate(parts):
+        part_courante = part.strip()
+        if not part_courante:
+            continue
+
+        title_match = TITLE_CONTAINS_PATTERN.search(part_courante)
+        if title_match is not None:
+            titre = nettoyer_valeur_extraite(title_match.group("value"))
+            if titre:
+                titres.append(titre)
+            continue
+
+        if WITHOUT_IMAGE_PATTERN.search(part_courante):
+            metadonnees["image"] = False
+            continue
+
+        if IMAGE_PATTERN.search(part_courante):
+            metadonnees["image"] = True
+            continue
+
+        theme = extraire_theme_depuis_part(part_courante)
+        operateur_precedent = operateurs[i - 1] if i > 0 and i - 1 < len(operateurs) else None
+        est_negatif = operateur_precedent in {"sans", "mais pas", "non pas", "et non pas"}
+
+        if theme and (theme != part_courante or est_negatif):
+            if est_negatif:
+                themes_exclus.append(theme)
+            else:
+                themes.append(theme)
+        else:
+            parts_restantes.append(part_courante)
+
+    if titres:
+        metadonnees["title_keywords"] = titres
+    if themes:
+        metadonnees["themes"] = themes
+    if themes_exclus:
+        metadonnees["themes_exclus"] = themes_exclus
+
+    metadonnees["parts"] = parts_restantes if parts_restantes else parts
+    if len(metadonnees["parts"]) >= 1:
+        metadonnees["part1"] = metadonnees["parts"][0]
+    if len(metadonnees["parts"]) >= 2:
+        metadonnees["part2"] = metadonnees["parts"][1]
     return metadonnees
 
 
@@ -257,11 +368,10 @@ def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list
     return selection
 
 
-def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
+def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
     heap: list[tuple[str, float]] = []
     meilleurs_scores: dict[str, float] = {}
-    
-    doc = nlp(source)
+    doc = nlp(partie)
 
     for token in doc:
         word_lemma = token.lemma_.lower()
@@ -269,13 +379,9 @@ def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, up
         if word_lemma in anti_list or not token.is_alpha:
             continue
 
-        if token in anti_list : 
-            continue
-
         try:
             tf_idf = tf_idf_dict[word_lemma]
-        except KeyError as err:
-            print(f"the word {word_lemma} not in TF_IDF file")
+        except KeyError:
             continue
 
         ancien_score = meilleurs_scores.get(word_lemma)
@@ -286,7 +392,26 @@ def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, up
         heapq.heappush(heap, (mot, score))
 
     candidats = heapq.nlargest(len(heap), heap, key=lambda x: x[1])
-    keywords = selectionner_keywords_dynamiques(candidats)
+    return selectionner_keywords_dynamiques(candidats)
+
+
+def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
+    parties = metadonnees.get("parts", [source])
+    keywords = []
+
+    for partie in parties:
+        keywords.extend(extraire_keywords_partie(partie, tf_idf_dict, anti_list))
+
+    for theme in metadonnees.get("themes", []):
+        keywords.extend(extraire_keywords_partie(theme, tf_idf_dict, anti_list))
+
+    for theme in metadonnees.get("themes_exclus", []):
+        keywords.extend(extraire_keywords_partie(theme, tf_idf_dict, anti_list))
+
+    for titre in metadonnees.get("title_keywords", []):
+        mot_titre = nettoyer_valeur_extraite(titre).lower()
+        if mot_titre:
+            keywords.append(mot_titre)
 
     deja_vus = set()
     for word in keywords:
