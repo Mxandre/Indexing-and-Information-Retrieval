@@ -156,6 +156,7 @@ def creer_xml_filtre(xml_entree, xml_sortie, subst):
     tree.write(xml_sortie, encoding='utf-8', xml_declaration=True)
 
 
+
 if __name__ == "__main__":
     Dict = segmente(path_xml)
     Dict = tf_idf(Dict)

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Moteur de Recherche - LO17</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; color: #333; }
+        h1 { color: #4285f4; text-align: center; margin-bottom: 30px; }
+        .search-box { display: flex; justify-content: center; gap: 10px; margin-bottom: 30px; padding: 20px; background: #f8f9fa; border-radius: 8px; }
+        .search-box input[type="text"] { flex-grow: 1; padding: 12px; font-size: 16px; border: 1px solid #dfe1e5; border-radius: 4px; }
+        .search-box select { padding: 12px; font-size: 16px; border: 1px solid #dfe1e5; border-radius: 4px; background: white; }
+        .search-box button { padding: 12px 24px; font-size: 16px; background-color: #4285f4; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .search-box button:hover { background-color: #357ae8; }
+        
+        .results-header { margin-bottom: 20px; font-size: 14px; color: #70757a; border-bottom: 1px solid #ebebeb; padding-bottom: 10px; }
+        .result { margin-bottom: 30px; }
+        .result-title { font-size: 20px; color: #1a0dab; margin-bottom: 4px; font-weight: 500; }
+        .result-meta { font-size: 13px; color: #006621; margin-bottom: 6px; }
+        .result-snippet { font-size: 14px; color: #545454; line-height: 1.5; word-wrap: break-word; }
+        mark { background-color: #ffe066; padding: 0 2px; border-radius: 2px; font-weight: bold; color: #000; }
+        
+        .no-results { text-align: center; padding: 40px; color: #70757a; }
+    </style>
+</head>
+<body>
+    <h1>Moteur de Recherche</h1>
+    
+    <div class="search-box">
+        <form method="POST" action="/" style="display: flex; width: 100%; gap: 10px;">
+            <input type="text" name="query" value="{{ query }}" placeholder="Entrez votre requête..." required>
+            <select name="sort">
+                <option value="relevance" {% if sort_by == 'relevance' %}selected{% endif %}>Tri: Pertinence</option>
+                <option value="date_desc" {% if sort_by == 'date_desc' %}selected{% endif %}>Tri: Date (Récent -> Ancien)</option>
+                <option value="date_asc" {% if sort_by == 'date_asc' %}selected{% endif %}>Tri: Date (Ancien -> Récent)</option>
+            </select>
+            <button type="submit">Rechercher</button>
+        </form>
+    </div>
+
+    {% if query %}
+        <div class="results-header">
+            Environ <strong>{{ results|length }}</strong> résultat(s) trouvé(s).
+        </div>
+        
+        {% if results %}
+            <div class="results">
+                {% for res in results %}
+                <div class="result">
+                    <div class="result-title">{{ res.titre }} (ID: {{ res.id }})</div>
+                    <div class="result-meta">Publié le {{ res.date }} | Rubrique: {{ res.rubrique }}</div>
+                    <div class="result-snippet">{{ res.snippet|safe }}</div>
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="no-results">Aucun document ne correspond à vos critères de recherche.</div>
+        {% endif %}
+    {% endif %}
+</body>
+</html>
