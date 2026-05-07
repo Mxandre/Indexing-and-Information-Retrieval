@@ -247,6 +247,46 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
         return {doc_id: 0.0 for doc_id in combined}
 
 
+def evaluer_requete_recursive(
+    requete_texte: str,
+    tf_idf_dict: dict,
+    anti_list: list,
+    index_inverse: dict,
+) -> set:
+    """
+    Evaluate a boolean query recursively.
+
+    Recursively splits compound queries (ET / OU / SANS) into sub-queries,
+    evaluates each leaf via evaluer_metadonnees, and combines results with
+    set operations.
+
+    Returns a set of doc_id strings.
+    """
+    # Step 1: normalise the raw query text
+    req_norm, upper_kw = normaliser_texte(requete_texte, key_word_traite=True)
+
+    # Step 2: parse the query into metadata / operator structure
+    meta = pipeline_traitement_requete(req_norm, defaultdict(list), tf_idf_dict, anti_list, upper_kw)
+
+    # Step 3: compound query — recurse on both parts
+    if "operateur" in meta and "part1" in meta and "part2" in meta:
+        res1 = evaluer_requete_recursive(meta["part1"], tf_idf_dict, anti_list, index_inverse)
+        res2 = evaluer_requete_recursive(meta["part2"], tf_idf_dict, anti_list, index_inverse)
+
+        operateur = meta["operateur"]
+        if operateur == "et":
+            return res1 & res2
+        elif operateur == "ou":
+            return res1 | res2
+        else:
+            # "sans", "mais pas", "non pas", "et non pas" → difference
+            return res1 - res2
+
+    # Step 4: leaf node — score documents and return as a set of doc_ids
+    scored = evaluer_metadonnees(meta, index_inverse)
+    return set(scored.keys())
+
+
 def charger_corpus(filepath: Path) -> dict:
     """
     Load the corpus from an XML file.
