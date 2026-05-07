@@ -24,6 +24,7 @@ DMY_PATTERN_TEXTE_RAW = rf"\b\d{{1,2}}\s+(?:{MONTH})\s+\d{{4}}\b"
 MY_PATTERN_RAW = r"\b\d{1,2}[/\-\s]+\d{4}\b"
 MY_TEXT_RAW = rf"\b(?:{MONTH})\s+\d{{4}}\b"
 Y_PATTERN_RAW = r"\b(?:19\d{2}|20\d{2})\b"
+DE_VARIANTS_PATTERN = r"(?:de|du|des|de la|de l[’']|d[’'])"
 
 RUBRIQUE_PATTERN = re.compile(r"\brubrique\s+(?P<rubrique>[A-Za-zÀ-ÿ\-]+)\b", re.IGNORECASE)
 BETWEEN_DMY = re.compile(
@@ -48,7 +49,7 @@ TITLE_CONTAINS_PATTERN = re.compile(
 IMAGE_PATTERN = re.compile(r"\bavec\s+des?\s+images?\b|\bavec\s+image\b|\bcontenant\s+une?\s+image\b|\bqui\s+ont\s+des?\s+images?\b", re.IGNORECASE)
 WITHOUT_IMAGE_PATTERN = re.compile(r"\bsans\s+image\b|\bsans\s+images\b", re.IGNORECASE)
 THEME_TRIGGER_PATTERN = re.compile(
-    r"\b(?:parl(?:e|ent|ant|er)\s+de|trait(?:e|ant|er)\s+de|sur|a\s+propos\s+de|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent))\b\s*(?P<theme>.+)",
+    rf"\b(?:parl(?:e|ent|ant|er)\s+{DE_VARIANTS_PATTERN}|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent))\b\s*(?P<theme>.+)",
     re.IGNORECASE,
 )
 
@@ -254,14 +255,10 @@ def traiter_op_logique(source: str, metadonnees: dict) -> dict:
     source_normalisee = normaliser_texte(source)
     parties, operateurs = decouper_expression_logique(source_normalisee)
 
-    metadonnees["parts"] = parties if parties else [source_normalisee]
+    parts_bruts = parties if parties else [source_normalisee]
+    metadonnees["parts_bruts"] = parts_bruts
     if operateurs:
         metadonnees["operateurs"] = operateurs
-        metadonnees["operateur"] = operateurs[0]
-    if len(metadonnees["parts"]) >= 1:
-        metadonnees["part1"] = metadonnees["parts"][0]
-    if len(metadonnees["parts"]) >= 2:
-        metadonnees["part2"] = metadonnees["parts"][1]
     return metadonnees
 
 
@@ -271,29 +268,65 @@ def nettoyer_valeur_extraite(value: str) -> str:
     return value.strip()
 
 
-def extraire_theme_depuis_part(partie: str) -> str | None:
+def supprimer_prefixe_theme(theme: str) -> str:
+    theme = nettoyer_valeur_extraite(theme)
+    theme = re.sub(
+        r"^(des|du|de la|de l[’']|d[’']|de|les|la|le|l[’'])\s*",
+        "",
+        theme,
+        flags=re.IGNORECASE,
+    )
+    return theme.strip()
+
+
+def est_partie_temporelle(partie: str) -> bool:
+    partie = nettoyer_valeur_extraite(partie.lower())
+    if not partie:
+        return False
+
+    if PATTERNS["between_dmy"].search(partie) or PATTERNS["between_my"].search(partie) or PATTERNS["between_y"].search(partie):
+        return True
+
+    if PATTERNS["dmy_numero"].search(partie) or PATTERNS["dmy_text"].search(partie):
+        return True
+
+    if PATTERNS["my_numero"].search(partie) or PATTERNS["my_text"].search(partie):
+        return True
+
+    if PATTERNS["y"].search(partie):
+        mots_temporels = ("mois", "annee", "an", "apres", "avant", "depuis", "partir", "date", "publie")
+        if any(mot in partie for mot in mots_temporels):
+            return True
+
+    return False
+
+
+
+def extraire_theme_depuis_part_v2(partie: str) -> str | None:
     partie = partie.strip()
     if not partie:
+        return None
+
+    if est_partie_temporelle(partie):
         return None
 
     partie = re.sub(r"^(?:non\s+pas|pas)\s+", "", partie, flags=re.IGNORECASE)
 
     match = THEME_TRIGGER_PATTERN.search(partie)
     if match is not None:
-        theme = nettoyer_valeur_extraite(match.group("theme"))
-        theme = re.sub(r"^(du|de la|de l|des|d)\s+", "", theme)
+        theme = supprimer_prefixe_theme(match.group("theme"))
         return theme if theme else None
 
-    match_simple = re.search(r"\b(?:de|du|de la|de l|des)\s+(.+)$", partie, re.IGNORECASE)
+    match_simple = re.search(r"\b(?:des|de|du|de la|de l[’']|d[’'])\s*(.+)$", partie, re.IGNORECASE)
     if match_simple is not None:
-        theme = nettoyer_valeur_extraite(match_simple.group(1))
+        theme = supprimer_prefixe_theme(match_simple.group(1))
         return theme if theme else None
 
     return nettoyer_valeur_extraite(partie)
 
 
 def traiter_filtres_structurels(metadonnees: dict) -> dict:
-    parts = metadonnees.get("parts", [])
+    parts = metadonnees.get("parts_bruts", [])
     operateurs = metadonnees.get("operateurs", [])
     parts_restantes = []
     themes = []
@@ -303,6 +336,10 @@ def traiter_filtres_structurels(metadonnees: dict) -> dict:
     for i, part in enumerate(parts):
         part_courante = part.strip()
         if not part_courante:
+            continue
+
+        if est_partie_temporelle(part_courante):
+            parts_restantes.append(part_courante)
             continue
 
         title_match = TITLE_CONTAINS_PATTERN.search(part_courante)
@@ -320,7 +357,7 @@ def traiter_filtres_structurels(metadonnees: dict) -> dict:
             metadonnees["image"] = True
             continue
 
-        theme = extraire_theme_depuis_part(part_courante)
+        theme = extraire_theme_depuis_part_v2(part_courante)
         operateur_precedent = operateurs[i - 1] if i > 0 and i - 1 < len(operateurs) else None
         est_negatif = operateur_precedent in {"sans", "mais pas", "non pas", "et non pas"}
 
@@ -339,11 +376,7 @@ def traiter_filtres_structurels(metadonnees: dict) -> dict:
     if themes_exclus:
         metadonnees["themes_exclus"] = themes_exclus
 
-    metadonnees["parts"] = parts_restantes if parts_restantes else parts
-    if len(metadonnees["parts"]) >= 1:
-        metadonnees["part1"] = metadonnees["parts"][0]
-    if len(metadonnees["parts"]) >= 2:
-        metadonnees["part2"] = metadonnees["parts"][1]
+    metadonnees["parts_themes_restants"] = parts_restantes
     return metadonnees
 
 
@@ -396,7 +429,7 @@ def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
 
 
 def traiter_mots_cles(source: str, metadonnees: dict, tf_idf_dict, anti_list, upper_key_word) -> dict:
-    parties = metadonnees.get("parts", [source])
+    parties = metadonnees.get("parts_themes_restants", metadonnees.get("parts_bruts", [source]))
     keywords = []
 
     for partie in parties:
