@@ -402,12 +402,22 @@ def generer_snippets(texte: str, keywords: list, window: int = 40) -> list:
         chunk = texte[win_start:win_end]
 
         # Highlight each keyword (case-insensitive, preserve original case)
-        for kw in keywords:
-            chunk = re.sub(
-                r"(?i)" + re.escape(kw),
-                lambda m: f"[{m.group(0)}]",
-                chunk,
-            )
+        # Collect all match spans on the ORIGINAL chunk first to avoid nested brackets
+        all_matches = []
+        for kw in set(keywords):  # deduplicate keywords
+            for m in re.finditer(re.escape(kw), chunk, re.IGNORECASE):
+                all_matches.append((m.start(), m.end(), m.group(0)))
+        all_matches.sort(key=lambda x: x[0])
+        result_parts = []
+        pos = 0
+        for start, end, found in all_matches:
+            if start < pos:
+                continue  # skip overlapping match
+            result_parts.append(chunk[pos:start])
+            result_parts.append(f"[{found}]")
+            pos = end
+        result_parts.append(chunk[pos:])
+        chunk = "".join(result_parts)
 
         # Add ellipsis prefix/suffix
         prefix = "..." if win_start > 0 else ""
@@ -450,15 +460,16 @@ def afficher_resultats(doc_ids: set, corpus_data: dict, keywords: list, mode: st
 
     else:  # mode == "booleen"
         # Sort by date descending (dd/mm/yyyy), unparseable dates go last
-        def parse_date(item):
-            _, data = item
+        def sort_key(item):
+            doc_id, data = item
             date_str = data.get("date", "")
             try:
-                return (0, datetime.strptime(date_str, "%d/%m/%Y"))
+                ts = datetime.strptime(date_str, "%d/%m/%Y").timestamp()
+                return (0, -ts)  # (0, negative timestamp) → more recent = smaller = sorts first
             except (ValueError, TypeError):
-                return (1, datetime.min)
+                return (1, 0)    # unparseable → sorts after all valid dates
 
-        docs.sort(key=parse_date, reverse=True)
+        docs.sort(key=sort_key)
 
     # Display results
     for i, (doc_id, data) in enumerate(docs, start=1):
