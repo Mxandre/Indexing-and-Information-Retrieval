@@ -13,6 +13,7 @@ sys.path.append(str(parent_dir / "TD5"))
 from traitement_requete import (
     normaliser_texte,
     pipeline_traitement_requete,
+    decouper_expression_logique,
     PICKLE_TF_IDF_FILE,
     PICKLE_ANTI_LIST,
     load_lemmatisatioin_file,
@@ -146,7 +147,11 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
     rubrique_docs: set[str] | None = None
     if rubrique is not None:
         rubrique_lower = rubrique.lower()
-        rub_entries = index_inverse.get(rubrique_lower, {})
+        rub_entries = {
+            doc_id: zones
+            for doc_id, zones in index_inverse.get(rubrique_lower, {}).items()
+            if "rubrique" in zones
+        }
         rubrique_docs = set(rub_entries.keys())
 
     # ------------------------------------------------------------------ #
@@ -156,10 +161,39 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
     if date_info is not None:
         dtype = date_info.get("type", "")
 
-        if dtype in ("dmy", "my", "y"):
-            # Single value lookup
+        if dtype == "dmy":
+            # Exact date lookup (dd/mm/yyyy key exists in index)
             val = date_info.get("value", "")
             date_docs = set(index_inverse.get(val, {}).keys())
+
+        elif dtype == "y":
+            year_val = date_info["value"]  # e.g. "2012"
+            date_docs = set()
+            for key, docs in index_inverse.items():
+                try:
+                    dt = datetime.strptime(key, "%d/%m/%Y")
+                    if str(dt.year) == year_val:
+                        date_docs.update(docs.keys())
+                except ValueError:
+                    pass
+
+        elif dtype == "my":
+            my_str = date_info["value"]  # e.g. "09/2012" or "septembre 2012"
+            date_docs = set()
+            # Try parsing as m/yyyy first
+            for fmt in ("%m/%Y", "%m-%Y", "%m %Y"):
+                try:
+                    target = datetime.strptime(my_str, fmt)
+                    for key, docs in index_inverse.items():
+                        try:
+                            dt = datetime.strptime(key, "%d/%m/%Y")
+                            if dt.month == target.month and dt.year == target.year:
+                                date_docs.update(docs.keys())
+                        except ValueError:
+                            pass
+                    break
+                except ValueError:
+                    continue
 
         elif dtype == "between_dmy":
             start_str = date_info.get("start", "")
@@ -262,29 +296,22 @@ def evaluer_requete_recursive(
 
     Returns a set of doc_id strings.
     """
-    # Step 1: normalise the raw query text
     req_norm, upper_kw = normaliser_texte(requete_texte, key_word_traite=True)
+    parties, operateurs = decouper_expression_logique(req_norm)
 
-    # Step 2: parse the query into metadata / operator structure
-    meta = pipeline_traitement_requete(req_norm, defaultdict(list), tf_idf_dict, anti_list, upper_kw)
-
-    # Step 3: compound query — recurse on both parts
-    if "operateur" in meta and "part1" in meta and "part2" in meta:
-        res1 = evaluer_requete_recursive(meta["part1"], tf_idf_dict, anti_list, index_inverse)
-        res2 = evaluer_requete_recursive(meta["part2"], tf_idf_dict, anti_list, index_inverse)
-
-        operateur = meta["operateur"]
-        if operateur == "et":
+    if len(parties) > 1 and operateurs:
+        op = operateurs[0].lower()
+        res1 = evaluer_requete_recursive(parties[0], tf_idf_dict, anti_list, index_inverse)
+        res2 = evaluer_requete_recursive(parties[1], tf_idf_dict, anti_list, index_inverse)
+        if op == "et":
             return res1 & res2
-        elif operateur == "ou":
+        elif op == "ou":
             return res1 | res2
-        else:
-            # "sans", "mais pas", "non pas", "et non pas" → difference
+        else:  # sans, mais pas, non pas, et non pas
             return res1 - res2
 
-    # Step 4: leaf node — score documents and return as a set of doc_ids
-    scored = evaluer_metadonnees(meta, index_inverse)
-    return set(scored.keys())
+    meta = pipeline_traitement_requete(req_norm, defaultdict(list), tf_idf_dict, anti_list, upper_kw)
+    return set(evaluer_metadonnees(meta, index_inverse).keys())
 
 
 def charger_corpus(filepath: Path) -> dict:
@@ -545,7 +572,8 @@ def lancer_moteur() -> None:
         # Extract keywords for snippet generation
         req_norm, upper_kw = normaliser_texte(requete, key_word_traite=True)
         meta = pipeline_traitement_requete(req_norm, defaultdict(list), tf_idf_dict, anti_list, upper_kw)
-        keywords = meta.get("key_word", [])
+        LOGICAL_OPS = {"et", "ou", "sans", "mais", "pas", "non"}
+        keywords = [k for k in meta.get("key_word", []) if k not in LOGICAL_OPS]
 
         afficher_resultats(doc_ids, corpus_data, keywords, mode)
 
