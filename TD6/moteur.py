@@ -96,9 +96,9 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> set:
 
 def evaluer_requete_recursive(requete_texte: str, tf_idf_dict: dict, anti_list: list, index_inverse: dict) -> set:
     """Traite la requête en évaluant récursivement les opérateurs logiques (ET, OU, SANS)."""
-    req_norm = normaliser_texte(requete_texte)
+    req_norm, upper_key_word = normaliser_texte(requete_texte, key_word_traite=True)
     meta = defaultdict(list)
-    meta = pipeline_traitement_requete(req_norm, meta, tf_idf_dict, anti_list)
+    meta = pipeline_traitement_requete(req_norm, meta, tf_idf_dict, anti_list,upper_key_word)
     
     # Gestion de l'arbre booléen en utilisant l'opérateur trouvé dans le TD5
     if "operateur" in meta and "part1" in meta and "part2" in meta:

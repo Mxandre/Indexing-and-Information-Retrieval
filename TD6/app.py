@@ -58,7 +58,7 @@ if CORPUS_FILE.exists():
             'texte': texte
         }
 else:
-    print(f"⚠️  Fichier corpus introuvable : {CORPUS_FILE}")
+    print(f"Fichier corpus introuvable : {CORPUS_FILE}")
 
 def get_highlight_keywords(query: str, anti_list: list) -> list:
     """Extrait tous les mots pertinents pour les surligner dans les snippets."""
