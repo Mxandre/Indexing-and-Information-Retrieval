@@ -49,7 +49,7 @@ TITLE_CONTAINS_PATTERN = re.compile(
 IMAGE_PATTERN = re.compile(r"\bavec\s+des?\s+images?\b|\bavec\s+image\b|\bcontenant\s+une?\s+image\b|\bqui\s+ont\s+des?\s+images?\b", re.IGNORECASE)
 WITHOUT_IMAGE_PATTERN = re.compile(r"\bsans\s+image\b|\bsans\s+images\b", re.IGNORECASE)
 THEME_TRIGGER_PATTERN = re.compile(
-    rf"\b(?:parl(?:e|ent|ant|er)\s+{DE_VARIANTS_PATTERN}|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent))\b\s*(?P<theme>.+)",
+    rf"\b(?:parl(?:e|ent|ant|er)(?:\s+{DE_VARIANTS_PATTERN})?|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent))\b\s*(?P<theme>.+)",
     re.IGNORECASE,
 )
 
@@ -338,6 +338,9 @@ def traiter_filtres_structurels(metadonnees: dict) -> dict:
         if not part_courante:
             continue
 
+        operateur_precedent = operateurs[i - 1] if i > 0 and i - 1 < len(operateurs) else None
+        est_negatif = operateur_precedent in {"sans", "mais pas", "non pas", "et non pas"}
+
         if est_partie_temporelle(part_courante):
             parts_restantes.append(part_courante)
             continue
@@ -353,13 +356,19 @@ def traiter_filtres_structurels(metadonnees: dict) -> dict:
             metadonnees["image"] = False
             continue
 
+        if part_courante.lower() in {"image", "images"} and est_negatif:
+            metadonnees["image"] = False
+            continue
+
         if IMAGE_PATTERN.search(part_courante):
             metadonnees["image"] = True
             continue
 
+        if part_courante.lower() in {"image", "images"}:
+            metadonnees["image"] = True
+            continue
+
         theme = extraire_theme_depuis_part_v2(part_courante)
-        operateur_precedent = operateurs[i - 1] if i > 0 and i - 1 < len(operateurs) else None
-        est_negatif = operateur_precedent in {"sans", "mais pas", "non pas", "et non pas"}
 
         if theme and (theme != part_courante or est_negatif):
             if est_negatif:
