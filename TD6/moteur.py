@@ -354,3 +354,190 @@ def charger_corpus(filepath: Path) -> dict:
         return {}
 
     return corpus
+
+
+def generer_snippets(texte: str, keywords: list, window: int = 40) -> list:
+    """
+    Find ALL occurrences of each keyword in texte and return contextual snippets.
+
+    Returns a list of snippet strings with keyword occurrences highlighted in [brackets].
+    Overlapping windows are merged. A fallback of the first 120 chars is returned if
+    no occurrences are found.
+    """
+    if not keywords or not texte:
+        return [texte[:120] + "..."] if texte else []
+
+    texte_lower = texte.lower()
+
+    # Step 1: collect all (start, end, kw_found) tuples for each keyword occurrence
+    occurrences = []
+    for kw in keywords:
+        kw_lower = kw.lower()
+        for m in re.finditer(re.escape(kw_lower), texte_lower):
+            idx = m.start()
+            start = max(0, idx - window)
+            end = min(len(texte), idx + len(kw) + window)
+            occurrences.append((start, end))
+
+    if not occurrences:
+        return [texte[:120] + "..."]
+
+    # Step 2: sort by start position
+    occurrences.sort(key=lambda x: x[0])
+
+    # Step 3: merge overlapping windows
+    merged = []
+    cur_start, cur_end = occurrences[0]
+    for start, end in occurrences[1:]:
+        if start <= cur_end:
+            cur_end = max(cur_end, end)
+        else:
+            merged.append((cur_start, cur_end))
+            cur_start, cur_end = start, end
+    merged.append((cur_start, cur_end))
+
+    # Step 4: build snippets with bracket highlighting
+    snippets = []
+    for win_start, win_end in merged:
+        chunk = texte[win_start:win_end]
+
+        # Highlight each keyword (case-insensitive, preserve original case)
+        for kw in keywords:
+            chunk = re.sub(
+                r"(?i)" + re.escape(kw),
+                lambda m: f"[{m.group(0)}]",
+                chunk,
+            )
+
+        # Add ellipsis prefix/suffix
+        prefix = "..." if win_start > 0 else ""
+        suffix = "..." if win_end < len(texte) else ""
+        snippets.append(prefix + chunk + suffix)
+
+    return snippets
+
+
+def afficher_resultats(doc_ids: set, corpus_data: dict, keywords: list, mode: str) -> None:
+    """
+    Display formatted search results to stdout.
+
+    Parameters:
+    - doc_ids: set of document IDs from evaluer_requete_recursive
+    - corpus_data: {bulletin_id: {titre, date, rubrique, texte}}
+    - keywords: list of keywords for snippet generation
+    - mode: "classe" or "booleen"
+    """
+    print(f"\n--- {len(doc_ids)} résultat(s) trouvé(s) ---\n")
+
+    if not doc_ids:
+        print("Aucun document trouvé.")
+        return
+
+    # Build list of (doc_id, data) tuples for sorting
+    docs = []
+    for doc_id in doc_ids:
+        data = corpus_data.get(doc_id, {})
+        docs.append((doc_id, data))
+
+    if mode == "classe":
+        # Sort by keyword frequency in texte + titre (descending)
+        def keyword_freq(item):
+            _, data = item
+            combined = (data.get("texte", "") + " " + data.get("titre", "")).lower()
+            return sum(combined.count(kw.lower()) for kw in keywords)
+
+        docs.sort(key=keyword_freq, reverse=True)
+
+    else:  # mode == "booleen"
+        # Sort by date descending (dd/mm/yyyy), unparseable dates go last
+        def parse_date(item):
+            _, data = item
+            date_str = data.get("date", "")
+            try:
+                return (0, datetime.strptime(date_str, "%d/%m/%Y"))
+            except (ValueError, TypeError):
+                return (1, datetime.min)
+
+        docs.sort(key=parse_date, reverse=True)
+
+    # Display results
+    for i, (doc_id, data) in enumerate(docs, start=1):
+        titre = data.get("titre", "")
+        date = data.get("date", "")
+        rubrique = data.get("rubrique", "")
+        texte = data.get("texte", "")
+
+        print(f"[{i}] Doc #{doc_id} | Date: {date} | Rubrique: {rubrique}")
+        print(f"    Titre : {titre}")
+
+        # Generate snippets from the full text
+        snips = generer_snippets(texte, keywords)
+        if snips:
+            print("    Extraits :")
+            for snip in snips:
+                print(f"      {snip}")
+
+        if i < len(docs):
+            print()
+
+
+def lancer_moteur() -> None:
+    """
+    Main interactive search engine loop.
+    """
+    mode = "classe"
+    print("================================================")
+    print(f"    MOTEUR DE RECHERCHE — Mode: {mode}")
+    print("================================================")
+    print("Commandes : /mode booleen | /mode classe | /quitter")
+
+    # Check/generate pickle files
+    if not PICKLE_TF_IDF_FILE.exists() or not PICKLE_ANTI_LIST.exists():
+        load_lemmatisatioin_file()
+
+    # Load data
+    with open(str(PICKLE_TF_IDF_FILE), "rb") as f:
+        tf_idf_dict = pickle.load(f)
+    with open(str(PICKLE_ANTI_LIST), "rb") as f:
+        anti_list = pickle.load(f)
+
+    index_inverse = charger_index(INDEX_INVERSE_FULL_FILE)
+    corpus_data = charger_corpus(CORPUS_FILE)
+
+    print("Moteur prêt !\n")
+
+    while True:
+        try:
+            requete = input("> ").strip()
+        except EOFError:
+            print("\nAu revoir !")
+            break
+
+        if not requete:
+            continue
+
+        if requete == "/quitter":
+            print("Au revoir !")
+            break
+        elif requete == "/mode booleen":
+            mode = "booleen"
+            print("Mode : booléen")
+            continue
+        elif requete == "/mode classe":
+            mode = "classe"
+            print("Mode : classé")
+            continue
+
+        # Evaluate query
+        doc_ids = evaluer_requete_recursive(requete, tf_idf_dict, anti_list, index_inverse)
+
+        # Extract keywords for snippet generation
+        req_norm, upper_kw = normaliser_texte(requete, key_word_traite=True)
+        meta = pipeline_traitement_requete(req_norm, defaultdict(list), tf_idf_dict, anti_list, upper_kw)
+        keywords = meta.get("key_word", [])
+
+        afficher_resultats(doc_ids, corpus_data, keywords, mode)
+
+
+if __name__ == "__main__":
+    lancer_moteur()
