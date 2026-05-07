@@ -90,6 +90,154 @@ def charger_index(filepath: Path) -> dict:
     return index
 
 
+def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, float]:
+    """
+    Score documents against metadata constraints (keywords, rubrique, date).
+
+    Returns {doc_id: score} where score is the sum of keyword contributions.
+    For rubrique/date-only results, score is 0.0.
+    Returns {} if all filters are absent.
+
+    Scoring for keywords:
+      score contribution per keyword per doc = freq_titre * 3 + freq_texte * 1
+    Intersection across ALL keywords is required.
+
+    Rubrique and date are AND-filtered on top of keyword results.
+    """
+    keywords = metadonnees.get("key_word", [])
+    rubrique = metadonnees.get("rubrique", None)
+    date_info = metadonnees.get("date", None)
+
+    # Empty case
+    if not keywords and rubrique is None and date_info is None:
+        return {}
+
+    # ------------------------------------------------------------------ #
+    # Step 1: keyword scoring with intersection across all keywords        #
+    # ------------------------------------------------------------------ #
+    keyword_scores: dict[str, float] | None = None  # None = "not filtered yet"
+
+    if keywords:
+        for keyword in keywords:
+            kw_docs = index_inverse.get(keyword, {})
+            # Compute per-doc score for this keyword
+            kw_scores: dict[str, float] = {}
+            for doc_id, zones in kw_docs.items():
+                freq_titre = zones.get("titre", 0)
+                freq_texte = zones.get("texte", 0)
+                kw_scores[doc_id] = freq_titre * 3 + freq_texte * 1
+
+            if keyword_scores is None:
+                keyword_scores = kw_scores
+            else:
+                # Intersection: keep only docs present for ALL keywords, sum scores
+                new_scores: dict[str, float] = {}
+                for doc_id, score in keyword_scores.items():
+                    if doc_id in kw_scores:
+                        new_scores[doc_id] = score + kw_scores[doc_id]
+                keyword_scores = new_scores
+
+        if keyword_scores is None:
+            keyword_scores = {}
+
+    # ------------------------------------------------------------------ #
+    # Step 2: rubrique filter                                              #
+    # ------------------------------------------------------------------ #
+    rubrique_docs: set[str] | None = None
+    if rubrique is not None:
+        rubrique_lower = rubrique.lower()
+        rub_entries = index_inverse.get(rubrique_lower, {})
+        rubrique_docs = set(rub_entries.keys())
+
+    # ------------------------------------------------------------------ #
+    # Step 3: date filter                                                  #
+    # ------------------------------------------------------------------ #
+    date_docs: set[str] | None = None
+    if date_info is not None:
+        dtype = date_info.get("type", "")
+
+        if dtype in ("dmy", "my", "y"):
+            # Single value lookup
+            val = date_info.get("value", "")
+            date_docs = set(index_inverse.get(val, {}).keys())
+
+        elif dtype == "between_dmy":
+            start_str = date_info.get("start", "")
+            end_str = date_info.get("end", "")
+            try:
+                start_dt = datetime.strptime(start_str, "%d/%m/%Y")
+                end_dt = datetime.strptime(end_str, "%d/%m/%Y")
+            except ValueError:
+                start_dt = end_dt = None
+
+            date_docs = set()
+            for key, docs in index_inverse.items():
+                try:
+                    key_dt = datetime.strptime(key, "%d/%m/%Y")
+                    if start_dt is not None and end_dt is not None:
+                        if start_dt <= key_dt <= end_dt:
+                            date_docs.update(docs.keys())
+                except ValueError:
+                    continue
+
+        elif dtype == "between_my":
+            start_str = date_info.get("start", "")
+            end_str = date_info.get("end", "")
+            # Format: "mm/yyyy"
+            try:
+                start_dt = datetime.strptime(start_str, "%m/%Y")
+                end_dt = datetime.strptime(end_str, "%m/%Y")
+            except ValueError:
+                start_dt = end_dt = None
+
+            date_docs = set()
+            for key, docs in index_inverse.items():
+                try:
+                    key_dt = datetime.strptime(key, "%m/%Y")
+                    if start_dt is not None and end_dt is not None:
+                        if start_dt <= key_dt <= end_dt:
+                            date_docs.update(docs.keys())
+                except ValueError:
+                    continue
+
+        elif dtype == "between_y":
+            start_str = date_info.get("start", "")
+            end_str = date_info.get("end", "")
+            date_docs = set()
+            for key, docs in index_inverse.items():
+                # Match keys that look like a 4-digit year
+                if re.fullmatch(r"\d{4}", key):
+                    if start_str <= key <= end_str:
+                        date_docs.update(docs.keys())
+
+    # ------------------------------------------------------------------ #
+    # Step 4: combine results                                              #
+    # ------------------------------------------------------------------ #
+
+    if keyword_scores is not None:
+        # Start from keyword results, intersect with rubrique and/or date
+        result = keyword_scores
+        if rubrique_docs is not None:
+            result = {doc_id: score for doc_id, score in result.items() if doc_id in rubrique_docs}
+        if date_docs is not None:
+            result = {doc_id: score for doc_id, score in result.items() if doc_id in date_docs}
+        return result
+
+    else:
+        # No keywords — combine rubrique and/or date sets with score 0.0
+        combined: set[str] | None = None
+        if rubrique_docs is not None:
+            combined = rubrique_docs
+        if date_docs is not None:
+            if combined is None:
+                combined = date_docs
+            else:
+                combined = combined & date_docs
+        if combined is None:
+            return {}
+        return {doc_id: 0.0 for doc_id in combined}
+
+
 def charger_corpus(filepath: Path) -> dict:
     """
     Load the corpus from an XML file.
