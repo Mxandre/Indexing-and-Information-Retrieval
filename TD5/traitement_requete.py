@@ -72,7 +72,7 @@ TF_IDF_FILE = Path("TD3/tf-idf.txt")
 PICKLE_TF_IDF_FILE = Path("TD5/tf-idf.pkl")
 ANTI_DICT_FILE = Path("TD3/anti_dict.txt")
 PICKLE_ANTI_LIST = Path("TD5/anti_list.pkl")
-RUBRIQUE_FILE = Path("TD3\corpus_filtre.xml")
+RUBRIQUE_FILE = Path("TD3/corpus_filtre.xml")
 
 nlp = spacy.load("fr_core_news_sm")
 
