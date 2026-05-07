@@ -170,6 +170,9 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
             except ValueError:
                 start_dt = end_dt = None
 
+            if start_dt is None or end_dt is None:
+                print(f"Avertissement : plage de dates non analysable ({date_info})")
+
             date_docs = set()
             for key, docs in index_inverse.items():
                 try:
@@ -190,6 +193,9 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
             except ValueError:
                 start_dt = end_dt = None
 
+            if start_dt is None or end_dt is None:
+                print(f"Avertissement : plage de dates non analysable ({date_info})")
+
             date_docs = set()
             for key, docs in index_inverse.items():
                 try:
@@ -207,8 +213,11 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
             for key, docs in index_inverse.items():
                 # Match keys that look like a 4-digit year
                 if re.fullmatch(r"\d{4}", key):
-                    if start_str <= key <= end_str:
-                        date_docs.update(docs.keys())
+                    try:
+                        if int(start_str) <= int(key) <= int(end_str):
+                            date_docs.update(docs.keys())
+                    except ValueError:
+                        pass
 
     # ------------------------------------------------------------------ #
     # Step 4: combine results                                              #
