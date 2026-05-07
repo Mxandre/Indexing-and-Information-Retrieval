@@ -1,13 +1,15 @@
+import csv
+import heapq
+import pickle
 import re
-import unicodedata
-from pathlib import Path
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
-import csv
-import pickle
-import spacy
-import heapq
-import xml.etree.ElementTree as ET
+
+try:
+    import spacy  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    spacy = None
 
 KEYWORD_GAP_THRESHOLD = 0.35
 KEYWORD_MIN_SCORE = 1.5
@@ -26,7 +28,12 @@ MY_TEXT_RAW = rf"\b(?:{MONTH})\s+\d{{4}}\b"
 Y_PATTERN_RAW = r"\b(?:19\d{2}|20\d{2})\b"
 DE_VARIANTS_PATTERN = r"(?:de|du|des|de la|de l[’']|d[’'])"
 
-RUBRIQUE_PATTERN = re.compile(r"\brubrique\s+(?P<rubrique>[A-Za-zÀ-ÿ\-]+)\b", re.IGNORECASE)
+# Capture la rubrique jusqu'à une conjonction logique ou la fin.
+# Ex: "rubrique au coeur des régions et ..." -> "au coeur des régions"
+RUBRIQUE_PATTERN = re.compile(
+    r"\brubrique\s+(?P<rubrique>.+?)(?=$|\b(?:et|ou|sans|mais\s+pas|non\s+pas)\b)",
+    re.IGNORECASE,
+)
 BETWEEN_DMY = re.compile(
     rf"\bentre\s+(?:le\s+)?(?P<start>{DMY_PATTERN_NUMERO_RAW}|{DMY_PATTERN_TEXTE_RAW})\s+et\s+(?:le\s+)?(?P<end>{DMY_PATTERN_NUMERO_RAW}|{DMY_PATTERN_TEXTE_RAW})\b",
     re.IGNORECASE,
@@ -66,46 +73,119 @@ PATTERNS = {
     "op": OP_PATTERN,
 }
 
-LEMMATISATION_FILE = Path("TD3/mot_lemma_list.txt")
-PICKELE_LEMMA_FILE = Path("TD5/lemma_dict.pkl")
-TF_IDF_FILE = Path("TD3/tf-idf.txt")
-PICKLE_TF_IDF_FILE = Path("TD5/tf-idf.pkl")
-ANTI_DICT_FILE = Path("TD3/anti_dict.txt")
-PICKLE_ANTI_LIST = Path("TD5/anti_list.pkl")
-RUBRIQUE_FILE = Path("TD3/corpus_filtre.xml")
+TD5_DIR = Path(__file__).resolve().parent
+ROOT_DIR = TD5_DIR.parent
 
-nlp = spacy.load("fr_core_news_sm")
+LEMMATISATION_FILE = ROOT_DIR / "TD3" / "mot_lemma_list.txt"
+PICKELE_LEMMA_FILE = TD5_DIR / "lemma_dict.pkl"
+TF_IDF_FILE = ROOT_DIR / "TD3" / "tf-idf.txt"
+PICKLE_TF_IDF_FILE = TD5_DIR / "tf-idf.pkl"
+ANTI_DICT_FILE = ROOT_DIR / "TD3" / "anti_dict.txt"
+PICKLE_ANTI_LIST = TD5_DIR / "anti_list.pkl"
+RUBRIQUE_FILE = ROOT_DIR / "TD3" / "corpus_filtre.xml"
+
+_NLP = None
+_LEMMA_DICT = None
+_RUBRIQUES = None
+
+
+def get_nlp():
+    global _NLP
+    if _NLP is not None:
+        return _NLP
+    if spacy is None:
+        _NLP = None
+        return None
+    _NLP = spacy.load("fr_core_news_sm")
+    return _NLP
+
+
+def get_lemma_dict() -> dict[str, str]:
+    global _LEMMA_DICT
+    if _LEMMA_DICT is not None:
+        return _LEMMA_DICT
+    if PICKELE_LEMMA_FILE.exists():
+        with open(PICKELE_LEMMA_FILE, "rb") as f:
+            _LEMMA_DICT = pickle.load(f)
+            return _LEMMA_DICT
+    # Fallback: charge depuis le fichier source si le pickle n'existe pas.
+    lemma_dict: dict[str, str] = {}
+    if LEMMATISATION_FILE.exists():
+        with open(LEMMATISATION_FILE, "r", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter="\t")
+            for raw in reader:
+                if not raw or len(raw) < 2:
+                    continue
+                inflection = raw[0].strip()
+                lemma = raw[1].strip()
+                if inflection:
+                    lemma_dict[inflection.lower()] = lemma.lower()
+    _LEMMA_DICT = lemma_dict
+    return _LEMMA_DICT
+
+
+def get_rubriques_corpus() -> list[str]:
+    global _RUBRIQUES
+    if _RUBRIQUES is not None:
+        return _RUBRIQUES
+    if not RUBRIQUE_FILE.exists():
+        _RUBRIQUES = []
+        return _RUBRIQUES
+    _RUBRIQUES = [r.lower() for r in get_rubrique(RUBRIQUE_FILE)]
+    # Trie décroissant pour favoriser les rubriques multi-mots
+    _RUBRIQUES.sort(key=len, reverse=True)
+    return _RUBRIQUES
 
 def load_lemmatisatioin_file():
-    lemma_dict = {}
-    with open(LEMMATISATION_FILE, "r", encoding = "utf-8") as file:
-        reader = csv.reader(file, delimiter = "\t")
-        for raw in reader :
-            if raw is not None or len(raw) < 2:
-                inflection = raw[0].strip()
-                word = raw[1].strip()
-                lemma_dict[inflection] = word
-        with open(PICKELE_LEMMA_FILE, "wb") as file:
-            pickle.dump(lemma_dict, file)
-    content = TF_IDF_FILE.read_text(encoding = "utf-8")
-    lines = content.split()
-    word_tf_idf = {}
+    """
+    Construit et sérialise:
+    - `lemma_dict.pkl` (inflection -> lemma)
+    - `tf-idf.pkl` (lemma -> score)
+    - `anti_list.pkl` (stopwords)
+    """
+    TD5_DIR.mkdir(parents=True, exist_ok=True)
 
-    for i in range(0, len(lines), 2):
-        word = lines[i]
-        tf_idf = float(lines[i+1])
-        word_tf_idf[word] = tf_idf
+    lemma_dict: dict[str, str] = {}
+    with open(LEMMATISATION_FILE, "r", encoding="utf-8") as file:
+        reader = csv.reader(file, delimiter="\t")
+        for raw in reader:
+            if not raw or len(raw) < 2:
+                continue
+            inflection = raw[0].strip()
+            lemma = raw[1].strip()
+            if inflection:
+                lemma_dict[inflection.lower()] = lemma.lower()
+    with open(PICKELE_LEMMA_FILE, "wb") as file:
+        pickle.dump(lemma_dict, file)
+
+    content = TF_IDF_FILE.read_text(encoding="utf-8")
+    lines = content.split()
+    word_tf_idf: dict[str, float] = {}
+    for i in range(0, len(lines) - 1, 2):
+        word = lines[i].strip().lower()
+        try:
+            tf_idf = float(lines[i + 1])
+        except ValueError:
+            continue
+        if word:
+            word_tf_idf[word] = tf_idf
     with open(PICKLE_TF_IDF_FILE, "wb") as file:
         pickle.dump(word_tf_idf, file)
-    content = ANTI_DICT_FILE.read_text(encoding = "utf-8")
-    lines = content.split()
-    anti_word = []
 
-    for i in range(0, len(lines), 2):
-        word = lines[i]
-        anti_word.append(word)
-    with open(PICKLE_ANTI_LIST, "wb") as file :
-        pickle.dump(anti_word, file)
+    anti_words: list[str] = []
+    with open(ANTI_DICT_FILE, "r", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter="\t")
+        for raw in reader:
+            if not raw:
+                continue
+            w = raw[0].strip().lower()
+            if w:
+                anti_words.append(w)
+    with open(PICKLE_ANTI_LIST, "wb") as file:
+        pickle.dump(anti_words, file)
+
+    global _LEMMA_DICT
+    _LEMMA_DICT = lemma_dict
 
 def get_rubrique(file_xml: Path) -> list[str]:
     tree = ET.parse(file_xml)
@@ -202,6 +282,18 @@ def traiter_metadonnees(source: str, metadonnees: defaultdict) -> dict:
                                 "type": "y",
                                 "value": y_pattern.group(0),
                             }
+
+    rubrique_match = PATTERNS["rubrique"].search(source_normalisee)
+    if rubrique_match is not None:
+        rubrique_raw = nettoyer_valeur_extraite(rubrique_match.group("rubrique")).lower()
+        if rubrique_raw:
+            rubriques_connues = get_rubriques_corpus()
+            rubrique_finale = None
+            for r in rubriques_connues:
+                if rubrique_raw.startswith(r):
+                    rubrique_finale = r
+                    break
+            metadonnees["rubrique"] = rubrique_finale or rubrique_raw
 
     return metadonnees
 
@@ -396,7 +488,9 @@ def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list
     candidats_tries = sorted(candidats, key=lambda x: x[1], reverse=True)
     meilleur_score = candidats_tries[0][1]
     if meilleur_score < KEYWORD_MIN_SCORE:
-        return []
+        # Fallback: sur des requêtes "courantes", les tf-idf peuvent être faibles.
+        # On garde au moins le meilleur candidat pour éviter de renvoyer une requête vide.
+        return [candidats_tries[0][0]]
 
     selection = [candidats_tries[0][0]]
 
@@ -413,19 +507,27 @@ def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list
 def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
     heap: list[tuple[str, float]] = []
     meilleurs_scores: dict[str, float] = {}
-    doc = nlp(partie)
+    nlp = get_nlp()
 
-    for token in doc:
-        word_lemma = token.lemma_.lower()
+    if nlp is not None:
+        doc = nlp(partie)
+        tokens = []
+        for token in doc:
+            if not token.is_alpha:
+                continue
+            tokens.append(token.lemma_.lower())
+    else:
+        lemma_dict = get_lemma_dict()
+        tokens = []
+        for w in re.findall(r"[A-Za-zÀ-ÿ]+", partie.lower()):
+            tokens.append(lemma_dict.get(w, w))
 
-        if word_lemma in anti_list or not token.is_alpha:
+    for word_lemma in tokens:
+        if word_lemma in anti_list:
             continue
-
-        try:
-            tf_idf = tf_idf_dict[word_lemma]
-        except KeyError:
+        tf_idf = tf_idf_dict.get(word_lemma)
+        if tf_idf is None:
             continue
-
         ancien_score = meilleurs_scores.get(word_lemma)
         if ancien_score is None or tf_idf > ancien_score:
             meilleurs_scores[word_lemma] = tf_idf
