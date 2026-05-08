@@ -1,5 +1,4 @@
 import csv
-import heapq
 import pickle
 import re
 import unicodedata
@@ -10,10 +9,6 @@ try:
     import spacy  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
     spacy = None
-
-KEYWORD_GAP_THRESHOLD = 0.35
-KEYWORD_MIN_SCORE = 1.5
-MAX_KEYWORDS = 5
 
 MONTH = r"janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre"
 DMY_PATTERN_NUMERO = r"\b(?P<day>\d{1,2})[/\-\s]+(?P<month>\d{1,2})[/\-\s]+(?P<year>\d{4})\b"
@@ -241,11 +236,11 @@ def pipeline_traitement_requete(
 
     # Step 5: extract keywords
     key_word, key_word_exclu = traiter_mots_cles(
-        source, parts_restants, themes, themes_exclu, tf_idf_dict, anti_list, upper_key_word
+        source, parts_restants, themes, themes_exclu, anti_list, upper_key_word
     )
 
     # Step 6: build sparse output (only non-None / non-empty optional fields)
-    result: dict = {"key_word": key_word, "key_word_exclu": key_word_exclu, "themes": themes, "themes_exclus": themes_exclu}
+    result: dict = {"key_word": key_word, "key_word_exclu": key_word_exclu}
     if title_kws:
         result["title_keywords"] = title_kws
     if filtres["rubrique"] is not None:
@@ -537,65 +532,22 @@ def traiter_filtres_structurels(
     return parts_restantes, titres, themes, themes_exclus, image
 
 
-def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list[str]:
-    if not candidats:
-        return []
-
-    candidats_tries = sorted(candidats, key=lambda x: x[1], reverse=True)
-
-    selection = [candidats_tries[0][0]]
-
-    for i in range(1, min(len(candidats_tries), MAX_KEYWORDS)):
-        score_precedent = candidats_tries[i - 1][1]
-        score_courant = candidats_tries[i][1]
-        if score_precedent - score_courant > KEYWORD_GAP_THRESHOLD:
-            break
-        selection.append(candidats_tries[i][0])
-
-    return selection
-
-
-def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
-    heap: list[tuple[str, float]] = []
-    meilleurs_scores: dict[str, float] = {}
+def extraire_keywords_partie(partie: str, anti_list: list) -> list[str]:
     nlp = get_nlp()
     if nlp is not None:
         doc = nlp(partie)
-        tokens = []
-        for token in doc:
-            if not token.is_alpha:
-                continue
-            tokens.append(token.lemma_.lower())
+        tokens = [token.lemma_.lower() for token in doc if token.is_alpha]
     else:
         lemma_dict = get_lemma_dict()
-        tokens = []
-        for w in re.findall(r"[A-Za-zÀ-ÿ]+", partie.lower()):
-            tokens.append(lemma_dict.get(w, w))
-    for word_lemma in tokens:
-        if word_lemma in anti_list or len(word_lemma) <= 1:
+        tokens = [lemma_dict.get(w, w) for w in re.findall(r"[A-Za-zÀ-ÿ]+", partie.lower())]
+    seen: set[str] = set()
+    result: list[str] = []
+    for w in tokens:
+        if len(w) <= 1 or w in anti_list or w in seen:
             continue
-        tf_idf = tf_idf_dict.get(word_lemma)
-        if tf_idf is None:
-            resolved = token.text.lower()
-            for suffix in ('s', 'es', 'aux'):
-                if word_lemma.endswith(suffix) and len(word_lemma) - len(suffix) >= 4:
-                    stripped = word_lemma[:-len(suffix)]
-                    if stripped in tf_idf_dict and stripped not in anti_list:
-                        resolved = stripped
-                        break
-            tf_idf = tf_idf_dict.get(resolved)
-            if tf_idf is None:
-                continue
-            word_lemma = resolved
-        ancien_score = meilleurs_scores.get(word_lemma)
-        if ancien_score is None or tf_idf > ancien_score:
-            meilleurs_scores[word_lemma] = tf_idf
-
-    for mot, score in meilleurs_scores.items():
-        heapq.heappush(heap, (mot, score))
-
-    candidats = heapq.nlargest(len(heap), heap, key=lambda x: x[1])
-    return selectionner_keywords_dynamiques(candidats)
+        seen.add(w)
+        result.append(w)
+    return result
 
 
 def traiter_mots_cles(
@@ -603,7 +555,6 @@ def traiter_mots_cles(
     parts_restants: list[str],
     themes: list[str],
     themes_exclus: list[str],
-    tf_idf_dict: dict,
     anti_list: list,
     upper_key_word: list[str],
 ) -> tuple[list[str], list[str]]:
@@ -612,13 +563,14 @@ def traiter_mots_cles(
     exclu_keywords: list[str] = []
 
     # for partie in parts_restants:
-    #     keywords.extend(extraire_keywords_partie(partie, tf_idf_dict, anti_list))
+    #     keywords.extend(extraire_keywords_partie(partie, anti_list))
 
     for theme in themes:
-        keywords.extend(theme.split())
+        keywords.extend(extraire_keywords_partie(theme, anti_list))
+        #keywords.extend(extraire_keywords_partie(theme, anti_list))
 
     for theme in themes_exclus:
-        exclu_keywords.extend(theme.split())
+        exclu_keywords.extend(extraire_keywords_partie(theme, anti_list))
 
     # title_keywords: NOT merged into key_word — moteur filters separately via _filtrer_titre
 
