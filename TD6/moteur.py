@@ -542,7 +542,7 @@ def filtrer_articles_pertinents(
     """
     Resolve bulletin IDs to individual articles and score by keyword relevance.
 
-    For each bulletin: score articles by keyword presence in titre (×3) and texte (×1).
+    For each bulletin: score articles by keyword presence in titre (x3) and texte (x1).
     If rubrique_filter: prefer articles whose rubrique matches; fall back to all if none match.
     Keep articles with score > 0; if none, keep all selected (trust the index match).
     """
