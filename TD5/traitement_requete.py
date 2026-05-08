@@ -27,7 +27,7 @@ DE_VARIANTS_PATTERN = r"(?:de la|de l['’']|de|du|des|d['’'])"
 # "est " prefix is skipped so "rubrique est Focus" → "Focus".
 # Stops at "et/ou/sans/mais/dont/qui" to avoid capturing surrounding sentence.
 RUBRIQUE_PATTERN = re.compile(
-    r"\brubrique\s+(?:est\s+|se\s+nomme\s+)?(?P<rubrique>.+?)(?=$|\b(?:et|ou|sans|mais|dont|qui)\b)",
+    r"\brubrique\s+(?:est\s+|se\s+nomme\s+)?(?P<rubrique>.+?)(?=$|\b(?:et|ou|sans|mais|dont|qui|parlant|traitant|mentionnant|contenant|évoquant|impliquant|portant|provenant|datant)\b)",
     re.IGNORECASE,
 )
 BETWEEN_DMY = re.compile(
@@ -51,11 +51,11 @@ TITLE_CONTAINS_PATTERN = re.compile(
 IMAGE_PATTERN = re.compile(r"\bavec\s+des?\s+images?\b|\bavec\s+image\b|\bcontenant\s+une?\s+image\b|\bqui\s+ont\s+des?\s+images?\b", re.IGNORECASE)
 WITHOUT_IMAGE_PATTERN = re.compile(r"\bsans\s+image\b|\bsans\s+images\b", re.IGNORECASE)
 NEGATIVE_THEME_PATTERN = re.compile(
-    rf"\bn[’']?e?\s*(?:parl(?:e|ent|ait|aient|ant|er)|trait(?:e|ent|ait|aient|ant|er)|evoqu(?:e|ent|ait|aient|ant|er)|mentionn(?:e|ent|ait|aient|ant|er)|concern(?:e|ent|ait|aient)|port(?:e|ent|ait|aient|ant|er))\s+pas\s+{DE_VARIANTS_PATTERN}(?P<theme>.+)",
+    rf"\bn[‘’]?e?\s*(?:parl(?:e|ent|ait|aient|ant|er)|trait(?:e|ent|ait|aient|ant|er)|évoqu(?:e|ent|ait|aient|ant|er)|mentionn(?:e|ent|ait|aient|ant|er)|concern(?:e|ent|ait|aient)|port(?:e|ent|ait|aient|ant|er))\s+pas\s+{DE_VARIANTS_PATTERN}(?P<theme>.+)",
     re.IGNORECASE,
 )
 THEME_TRIGGER_PATTERN = re.compile(
-    rf"\b(?:parl(?:e|ent|ant|er)(?:\s+{DE_VARIANTS_PATTERN})?|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent)|contien(?:t|nent)|contenant|possèd[e]?(?:nt)?|possédant|impliqu(?:e|ent|ant|er)|comport(?:e|ent|ant|er))\b\s*(?P<theme>.+)",
+    rf"\b(?:parl(?:e|ent|ant|er)(?:\s+{DE_VARIANTS_PATTERN})?|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|évoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent)|contien(?:t|nent)|contenant|possèd[e]?(?:nt)?|possédant|impliqu(?:e|ent|ant|er)|comport(?:e|ent|ant|er))\b\s*(?P<theme>.+)",
     re.IGNORECASE,
 )
 
@@ -326,9 +326,6 @@ def extraire_filtres_globaux(source: str) -> tuple[str, dict]:
             filtres["rubrique"] = rubrique_finale or rubrique_raw
         source = RUBRIQUE_PATTERN.sub("", source)
 
-    # Strip structural verb fragments left after rubrique/filter extraction
-    source = re.sub(r"\bparlant\b|\bprovenant\b", "", source, flags=re.IGNORECASE)
-
     source = re.sub(r"\s+", " ", source).strip()
     return source, filtres
 
@@ -397,7 +394,7 @@ def est_partie_temporelle(partie: str) -> bool:
 
     if PATTERNS["y"].search(partie):
         mots_temporels = ("mois", "annee", "an", "apres", "avant", "depuis", "partir", "date", "publie")
-        if any(mot in partie for mot in mots_temporels):
+        if any(re.search(r'\b' + mot + r'\b', partie) for mot in mots_temporels):
             return True
 
     return False
