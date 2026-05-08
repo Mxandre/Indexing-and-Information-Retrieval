@@ -3355,7 +3355,7 @@ e-santé              1.544068044350275
 optionnel            1.544068044350275   
 bts                  1.544068044350275   
 dut                  1.544068044350275   
-http://www.admission-postbac.fr 1.544068044350275   
+http://www.admission-postbac.fr 1.544068044350275    
 primitif             1.544068044350275   
 1997                 1.544068044350275   
 orphelin             1.544068044350275   
@@ -3495,7 +3495,7 @@ focalisation         1.544068044350275
 biomédical           1.544068044350275   
 impérativement       1.544068044350275   
 recouvrir            1.544068044350275   
-1]alimentation       1.544068044350275   
+alimentation           1.544068044350275   
 érosion              1.544068044350275   
 250                  1.544068044350275   
 impacts              1.544068044350275   

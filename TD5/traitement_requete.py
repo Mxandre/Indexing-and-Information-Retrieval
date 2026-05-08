@@ -26,7 +26,7 @@ DMY_PATTERN_TEXTE_RAW = rf"\b\d{{1,2}}\s+(?:{MONTH})\s+\d{{4}}\b"
 MY_PATTERN_RAW = r"\b\d{1,2}[/\-\s]+\d{4}\b"
 MY_TEXT_RAW = rf"\b(?:{MONTH})\s+\d{{4}}\b"
 Y_PATTERN_RAW = r"\b(?:19\d{2}|20\d{2})\b"
-DE_VARIANTS_PATTERN = r"(?:de|du|des|de la|de l['']|d[''])"
+DE_VARIANTS_PATTERN = r"(?:de la|de l['’']|de|du|des|d['’'])"
 
 # Capture la rubrique jusqu'à une conjonction logique ou la fin.
 # "est " prefix is skipped so "rubrique est Focus" → "Focus".
@@ -50,11 +50,15 @@ BETWEEN_Y = re.compile(
 OP_PATTERN = re.compile(r"(?P<part1>.+?)\b(?P<op>et|ou|sans)\b(?P<part2>.+)", re.IGNORECASE)
 LOGICAL_OP_PATTERN = re.compile(r"\bet\s+non\s+pas\b|\bnon\s+pas\b|\bmais\s+pas\b|\bsans\b|\bet\b|\bou\b", re.IGNORECASE)
 TITLE_CONTAINS_PATTERN = re.compile(
-    r"\bdont\s+le\s+titre\s+(?:contient|evoque)\s+(?:le\s+mot|les\s+mots|le\s+terme)?\s*\"?(?P<value>[^\"]+?)\"?(?:$|\b(?:et|ou|mais\s+pas|sans)\b)",
+    r"\bdont\s+le\s+titre\s+(?:contient|évoque)\s+(?:le\s+mot|les\s+mots|le\s+terme)?\s*\"?(?P<value>[^\"]+?)\"?(?:$|\b(?:et|ou|mais\s+pas|sans)\b)",
     re.IGNORECASE,
 )
 IMAGE_PATTERN = re.compile(r"\bavec\s+des?\s+images?\b|\bavec\s+image\b|\bcontenant\s+une?\s+image\b|\bqui\s+ont\s+des?\s+images?\b", re.IGNORECASE)
 WITHOUT_IMAGE_PATTERN = re.compile(r"\bsans\s+image\b|\bsans\s+images\b", re.IGNORECASE)
+NEGATIVE_THEME_PATTERN = re.compile(
+    rf"\bn[’']?e?\s*(?:parl(?:e|ent|ait|aient|ant|er)|trait(?:e|ent|ait|aient|ant|er)|evoqu(?:e|ent|ait|aient|ant|er)|mentionn(?:e|ent|ait|aient|ant|er)|concern(?:e|ent|ait|aient)|port(?:e|ent|ait|aient|ant|er))\s+pas\s+{DE_VARIANTS_PATTERN}(?P<theme>.+)",
+    re.IGNORECASE,
+)
 THEME_TRIGGER_PATTERN = re.compile(
     rf"\b(?:parl(?:e|ent|ant|er)(?:\s+{DE_VARIANTS_PATTERN})?|trait(?:e|ant|er)\s+{DE_VARIANTS_PATTERN}|sur|a\s+propos\s+{DE_VARIANTS_PATTERN}|evoqu(?:e|ent|ant|er)|mentionn(?:e|ent|ant|er)|port(?:e|ent|ant|er)\s+sur|li(?:e|es)\s+a|concern(?:e|ent)|contien(?:t|nent)|contenant|possèd[e]?(?:nt)?|possédant|impliqu(?:e|ent|ant|er)|comport(?:e|ent|ant|er))\b\s*(?P<theme>.+)",
     re.IGNORECASE,
@@ -241,7 +245,7 @@ def pipeline_traitement_requete(
     )
 
     # Step 6: build sparse output (only non-None / non-empty optional fields)
-    result: dict = {"key_word": key_word, "key_word_exclu": key_word_exclu}
+    result: dict = {"key_word": key_word, "key_word_exclu": key_word_exclu, "themes": themes, "themes_exclus": themes_exclu}
     if title_kws:
         result["title_keywords"] = title_kws
     if filtres["rubrique"] is not None:
@@ -308,7 +312,8 @@ def extraire_filtres_globaux(source: str) -> tuple[str, dict]:
         m = pattern.search(source)
         if m:
             filtres["date"] = extractor(m)
-            source = source[: m.start()] + source[m.end():]
+            ## to make theme extraction cleaner, 
+            # source = source[: m.start()] + source[m.end():]
             break
 
     # Rubrique — extract value from first match, then strip all occurrences
@@ -403,11 +408,10 @@ def est_partie_temporelle(partie: str) -> bool:
     return False
 
 
-def extraire_theme_depuis_part_v2(partie: str) -> str | None:
+def extraire_theme_depuis_part_v2(partie: str, dernier_type: str) -> str | None:
     partie = partie.strip()
     if not partie:
         return None
-
     if est_partie_temporelle(partie):
         return None
 
@@ -417,12 +421,40 @@ def extraire_theme_depuis_part_v2(partie: str) -> str | None:
     if match is not None:
         theme = supprimer_prefixe_theme(match.group("theme"))
         return theme if theme else None
+    if dernier_type in {"theme", "theme_exclu"}:
+        match_simple = re.search(r"\b(?:des|de l['’']|de la|de|du|d['’'])\s*(.+)$", partie, re.IGNORECASE)
+        if match_simple is not None:
+            theme = supprimer_prefixe_theme(match_simple.group(1))
+            return theme if theme else None
 
-    match_simple = re.search(r"\b(?:des|de|du|de la|de l['']|d[''])\s*(.+)$", partie, re.IGNORECASE)
-    if match_simple is not None:
-        theme = supprimer_prefixe_theme(match_simple.group(1))
-        return theme if theme else None
+    return nettoyer_valeur_extraite(partie)
 
+
+def extraire_theme_negatif_depuis_part(partie: str) -> str | None:
+    partie = partie.strip()
+    if not partie:
+        return None
+
+    match = NEGATIVE_THEME_PATTERN.search(partie)
+    if match is None:
+        return None
+
+    theme = supprimer_prefixe_theme(match.group("theme"))
+    return theme if theme else None
+
+
+def nettoyer_titre_suite(partie: str) -> str:
+    partie = nettoyer_valeur_extraite(partie)
+    partie = re.sub(r"^(?:et|ou)\s+", "", partie, flags=re.IGNORECASE)
+    partie = re.sub(r"^(?:le|les)\s+(?:mot|mots|terme|termes)\s*", "", partie, flags=re.IGNORECASE)
+    partie = nettoyer_valeur_extraite(partie)
+    return partie
+
+
+def nettoyer_theme_suite(partie: str) -> str:
+    partie = nettoyer_valeur_extraite(partie)
+    partie = re.sub(r"^(?:et|ou)\s+", "", partie, flags=re.IGNORECASE)
+    partie = supprimer_prefixe_theme(partie)
     return nettoyer_valeur_extraite(partie)
 
 
@@ -436,7 +468,7 @@ def traiter_filtres_structurels(
     themes_exclus: list[str] = []
     titres: list[str] = []
     image: bool | None = None
-
+    dernier_type = None
     for i, part in enumerate(parts):
         part_courante = part.strip()
         if not part_courante:
@@ -447,40 +479,60 @@ def traiter_filtres_structurels(
 
         if est_partie_temporelle(part_courante):
             parts_restantes.append(part_courante)
+            dernier_type = None
             continue
 
         title_match = TITLE_CONTAINS_PATTERN.search(part_courante)
         if title_match is not None:
+            dernier_type = "title"
             titre = nettoyer_valeur_extraite(title_match.group("value"))
             if titre:
                 titres.append(titre)
             continue
 
-        if WITHOUT_IMAGE_PATTERN.search(part_courante):
-            image = False
+        theme_negatif = extraire_theme_negatif_depuis_part(part_courante)
+        if theme_negatif:
+            themes_exclus.append(theme_negatif)
+            dernier_type = "theme_exclu"
             continue
 
-        if part_courante.lower() in {"image", "images"} and est_negatif:
-            image = False
-            continue
-
-        if IMAGE_PATTERN.search(part_courante):
-            image = True
-            continue
-
-        if part_courante.lower() in {"image", "images"}:
-            image = True
-            continue
-
-        theme = extraire_theme_depuis_part_v2(part_courante)
-
-        if theme and (theme != part_courante or est_negatif):
+        theme = extraire_theme_depuis_part_v2(part_courante, dernier_type)
+        if theme and theme != part_courante:
             if est_negatif:
                 themes_exclus.append(theme)
+                dernier_type = "theme_exclu"
             else:
                 themes.append(theme)
+                dernier_type = "theme"
+            continue
+
+        if dernier_type == "title" and operateur_precedent in {"et", "ou"}:
+            titre_suite = nettoyer_titre_suite(part_courante)
+            if titre_suite:
+                titres.append(titre_suite)
+                continue
+            dernier_type = None
+
+        if dernier_type == "theme" and operateur_precedent in {"et", "ou"}:
+            theme_suite = nettoyer_theme_suite(part_courante)
+            if theme_suite:
+                themes.append(theme_suite)
+                continue
+            dernier_type = None
+
+        if dernier_type == "theme_exclu" and operateur_precedent in {"et", "ou"}:
+            theme_suite = nettoyer_theme_suite(part_courante)
+            if theme_suite:
+                themes_exclus.append(theme_suite)
+                continue
+            dernier_type = None
+
+        if theme and est_negatif:
+            themes_exclus.append(theme)
+            dernier_type = "theme_exclu"
         else:
             parts_restantes.append(part_courante)
+            dernier_type = None
 
     return parts_restantes, titres, themes, themes_exclus, image
 
@@ -490,9 +542,6 @@ def selectionner_keywords_dynamiques(candidats: list[tuple[str, float]]) -> list
         return []
 
     candidats_tries = sorted(candidats, key=lambda x: x[1], reverse=True)
-    meilleur_score = candidats_tries[0][1]
-    if meilleur_score < KEYWORD_MIN_SCORE:
-        return [candidats_tries[0][0]]
 
     selection = [candidats_tries[0][0]]
 
@@ -510,7 +559,6 @@ def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
     heap: list[tuple[str, float]] = []
     meilleurs_scores: dict[str, float] = {}
     nlp = get_nlp()
-
     if nlp is not None:
         doc = nlp(partie)
         tokens = []
@@ -523,13 +571,12 @@ def extraire_keywords_partie(partie: str, tf_idf_dict, anti_list) -> list[str]:
         tokens = []
         for w in re.findall(r"[A-Za-zÀ-ÿ]+", partie.lower()):
             tokens.append(lemma_dict.get(w, w))
-
     for word_lemma in tokens:
         if word_lemma in anti_list or len(word_lemma) <= 1:
             continue
         tf_idf = tf_idf_dict.get(word_lemma)
         if tf_idf is None:
-            resolved = word_lemma
+            resolved = token.text.lower()
             for suffix in ('s', 'es', 'aux'):
                 if word_lemma.endswith(suffix) and len(word_lemma) - len(suffix) >= 4:
                     stripped = word_lemma[:-len(suffix)]
@@ -564,14 +611,14 @@ def traiter_mots_cles(
     keywords: list[str] = []
     exclu_keywords: list[str] = []
 
-    for partie in parts_restants:
-        keywords.extend(extraire_keywords_partie(partie, tf_idf_dict, anti_list))
+    # for partie in parts_restants:
+    #     keywords.extend(extraire_keywords_partie(partie, tf_idf_dict, anti_list))
 
     for theme in themes:
-        keywords.extend(extraire_keywords_partie(theme, tf_idf_dict, anti_list))
+        keywords.extend(theme.split())
 
     for theme in themes_exclus:
-        exclu_keywords.extend(extraire_keywords_partie(theme, tf_idf_dict, anti_list))
+        exclu_keywords.extend(theme.split())
 
     # title_keywords: NOT merged into key_word — moteur filters separately via _filtrer_titre
 
@@ -616,4 +663,5 @@ if __name__ == "__main__":
             print(f"\n{request.strip()}")
             for k, v in result.items():
                 if v:
-                    print(f"  {k:<16}: {v}")
+                    print(f"{k}: {v}")
+                    # print(f"  {k:<16}: {v}")
