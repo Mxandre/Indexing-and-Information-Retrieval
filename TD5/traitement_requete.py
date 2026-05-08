@@ -567,7 +567,6 @@ def traiter_mots_cles(
 
     for theme in themes:
         keywords.extend(extraire_keywords_partie(theme, anti_list))
-        #keywords.extend(extraire_keywords_partie(theme, anti_list))
 
     for theme in themes_exclus:
         exclu_keywords.extend(extraire_keywords_partie(theme, anti_list))
