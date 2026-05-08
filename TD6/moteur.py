@@ -93,6 +93,30 @@ def charger_index(filepath: Path) -> dict:
     return index
 
 
+MOIS_FR = {
+    "janvier": 1, "février": 2, "mars": 3, "avril": 4,
+    "mai": 5, "juin": 6, "juillet": 7, "août": 8,
+    "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12,
+}
+
+
+def _parse_dmy(s: str) -> datetime | None:
+    """Parse DMY string: numeric (%d/%m/%Y) or French text-month ('3 mars 2013')."""
+    try:
+        return datetime.strptime(s, "%d/%m/%Y")
+    except ValueError:
+        pass
+    m = re.match(r"(\d{1,2})\s+(\w+)\s+(\d{4})", s.strip(), re.IGNORECASE)
+    if m:
+        month = MOIS_FR.get(m.group(2).lower())
+        if month:
+            try:
+                return datetime(int(m.group(3)), month, int(m.group(1)))
+            except ValueError:
+                pass
+    return None
+
+
 def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, float]:
     """
     Score documents against metadata constraints (keywords, rubrique, date).
@@ -185,9 +209,12 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
         dtype = date_info.get("type", "")
 
         if dtype == "dmy":
-            # Exact date lookup (dd/mm/yyyy key exists in index)
             val = date_info.get("value", "")
             date_docs = set(index_inverse.get(val, {}).keys())
+            if not date_docs:
+                dt = _parse_dmy(val)
+                if dt:
+                    date_docs = set(index_inverse.get(dt.strftime("%d/%m/%Y"), {}).keys())
 
         elif dtype == "y":
             year_val = date_info["value"]  # e.g. "2012"
@@ -203,29 +230,35 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
         elif dtype == "my":
             my_str = date_info["value"]  # e.g. "09/2012" or "septembre 2012"
             date_docs = set()
-            # Try parsing as m/yyyy first
+            target: datetime | None = None
             for fmt in ("%m/%Y", "%m-%Y", "%m %Y"):
                 try:
                     target = datetime.strptime(my_str, fmt)
-                    for key, docs in index_inverse.items():
-                        try:
-                            dt = datetime.strptime(key, "%d/%m/%Y")
-                            if dt.month == target.month and dt.year == target.year:
-                                date_docs.update(docs.keys())
-                        except ValueError:
-                            pass
                     break
                 except ValueError:
                     continue
+            if target is None:
+                # Text-month format: "septembre 2012"
+                m2 = re.match(r"(\w+)\s+(\d{4})", my_str.strip(), re.IGNORECASE)
+                if m2:
+                    month = MOIS_FR.get(m2.group(1).lower())
+                    if month:
+                        try:
+                            target = datetime(int(m2.group(2)), month, 1)
+                        except ValueError:
+                            pass
+            if target is not None:
+                for key, docs in index_inverse.items():
+                    try:
+                        dt = datetime.strptime(key, "%d/%m/%Y")
+                        if dt.month == target.month and dt.year == target.year:
+                            date_docs.update(docs.keys())
+                    except ValueError:
+                        pass
 
         elif dtype == "between_dmy":
-            start_str = date_info.get("start", "")
-            end_str = date_info.get("end", "")
-            try:
-                start_dt = datetime.strptime(start_str, "%d/%m/%Y")
-                end_dt = datetime.strptime(end_str, "%d/%m/%Y")
-            except ValueError:
-                start_dt = end_dt = None
+            start_dt = _parse_dmy(date_info.get("start", ""))
+            end_dt = _parse_dmy(date_info.get("end", ""))
 
             if start_dt is None or end_dt is None:
                 print(f"Avertissement : plage de dates non analysable ({date_info})")
