@@ -202,7 +202,6 @@ def normaliser_texte(source: str, key_word_traite=False):
         for word in words:
             if any(c.isalpha() for c in word) and word.isupper():
                 key_word.append(word)
-    source = source.lower()
     if key_word_traite:
         return source.strip(), key_word
     return source.strip()
