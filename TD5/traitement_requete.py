@@ -209,7 +209,6 @@ def normaliser_texte(source: str, key_word_traite=False):
 
 def pipeline_traitement_requete(
     source: str,
-    tf_idf_dict: dict,
     anti_list: list,
     upper_key_word: list,
 ) -> dict:
@@ -235,7 +234,7 @@ def pipeline_traitement_requete(
 
     # Step 5: extract keywords
     key_word, key_word_exclu = traiter_mots_cles(
-        source, parts_restants, themes, themes_exclu, anti_list, upper_key_word
+        themes, themes_exclu, anti_list, upper_key_word
     )
 
     # Step 6: build sparse output (only non-None / non-empty optional fields)
@@ -547,8 +546,6 @@ def extraire_keywords_partie(partie: str, anti_list: list) -> list[str]:
 
 
 def traiter_mots_cles(
-    source: str,
-    parts_restants: list[str],
     themes: list[str],
     themes_exclus: list[str],
     anti_list: list,
@@ -605,10 +602,9 @@ if __name__ == "__main__":
 
     for request in requests:
         request_norm, upper_kw = normaliser_texte(request, key_word_traite=True)
-        result = pipeline_traitement_requete(request_norm, tf_idf_dict, anti_list, upper_kw)
+        result = pipeline_traitement_requete(request_norm, anti_list, upper_kw)
         if any(result.values()):
             print(f"\n{request.strip()}")
             for k, v in result.items():
                 if v:
                     print(f"{k}: {v}")
-                    # print(f"  {k:<16}: {v}")
