@@ -1,3 +1,10 @@
+"""Analyseur de requêtes avec correction orthographique par distance de Levenshtein.
+
+Charge un lexique TSV (mot → lemme), tokenise une requête, valide chaque token
+contre le lexique et propose des corrections basées sur le préfixe commun et la
+distance de Levenshtein pour les tokens hors-lexique.
+"""
+
 from __future__ import annotations
 
 import re
@@ -25,24 +32,46 @@ NUMBER_PATTERN = re.compile(r"^\d+(?:[.,]\d+)?$")
 
 
 def strip_accents(text: str) -> str:
-    '''Supprime les accents d'une chaîne de caractères.'''
-    normalized = unicodedata.normalize("NFKD", text)  ## transform the accent to unicode data
-    return "".join(char for char in normalized if not unicodedata.combining(char)) ## combining to recognize if it is a adding unicode data
+    """Supprime les accents d'une chaîne de caractères."""
+    normalized = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in normalized if not unicodedata.combining(char))
 
 
 def normalize(text: str) -> str:
-    '''Normalise un token en supprimant les accents, en le mettant en minuscules et en remplaçant les apostrophes.'''
+    """Normalise un token : minuscules, suppression des accents, apostrophes typographiques.
+
+    Args:
+        text (str): Token brut.
+
+    Returns:
+        str: Token normalisé.
+    """
     text = text.strip().lower().replace("’", "'")
     return strip_accents(text)
 
 
 def tokenize(text: str) -> list[str]:
-    '''Tokenise une chaîne de caractères en utilisant une expression régulière.'''
+    """Tokenise une chaîne de caractères selon le patron TOKEN_PATTERN.
+
+    Args:
+        text (str): Texte brut.
+
+    Returns:
+        list[str]: Liste de tokens extraits.
+    """
     return TOKEN_PATTERN.findall(text.replace("’", "'"))
 
 
 def common_prefix_length(left: str, right: str) -> int:
-    '''Calcule la longueur du préfixe commun entre deux chaînes de caractères.'''
+    """Calcule la longueur du préfixe commun entre deux chaînes.
+
+    Args:
+        left (str): Première chaîne.
+        right (str): Deuxième chaîne.
+
+    Returns:
+        int: Nombre de caractères consécutifs identiques depuis le début.
+    """
     limit = min(len(left), len(right))
     size = 0
     while size < limit and left[size] == right[size]:
@@ -51,7 +80,15 @@ def common_prefix_length(left: str, right: str) -> int:
 
 
 def levenshtein_distance(left: str, right: str) -> int:
-    '''Calcule la distance de Levenshtein entre deux chaînes de caractères.'''
+    """Calcule la distance de Levenshtein entre deux chaînes.
+
+    Args:
+        left (str): Chaîne source.
+        right (str): Chaîne cible.
+
+    Returns:
+        int: Nombre minimal d'insertions, suppressions ou substitutions.
+    """
     if left == right:
         return 0
     if not left:
@@ -72,12 +109,27 @@ def levenshtein_distance(left: str, right: str) -> int:
 
 
 def is_specific_entity(token: str) -> bool:
-    '''Vérifie si un token est une entité spécifique : une date ou un nombre.'''
+    """Vérifie si un token est une date ou un nombre (entité à conserver telle quelle).
+
+    Args:
+        token (str): Token à tester.
+
+    Returns:
+        bool: ``True`` si le token est une date ou un nombre.
+    """
     return bool(DATE_PATTERN.match(token) or NUMBER_PATTERN.match(token))
 
 
 def safe_spacy_tokenize_and_lemmatize(text: str) -> list[tuple[str, str]]:
-    '''Tokenise et lemmatise une chaîne de caractères en utilisant Spacy.'''
+    """Tokenise et lemmatise une chaîne avec spaCy si disponible.
+
+    Args:
+        text (str): Texte à analyser.
+
+    Returns:
+        list[tuple[str, str]]: Paires ``(forme_originale, lemme_minuscule)``,
+        ou liste vide si spaCy est indisponible.
+    """
     try:
         import spacy  # type: ignore
 
@@ -94,6 +146,8 @@ def safe_spacy_tokenize_and_lemmatize(text: str) -> list[tuple[str, str]]:
 
 @dataclass(frozen=True)
 class Candidate:
+    """Représente un candidat de correction pour un token hors-lexique."""
+
     word: str
     lemma: str
     prefix_len: int
@@ -102,14 +156,31 @@ class Candidate:
 
 
 class Lexicon:
+    """Lexique mot → lemme chargé depuis un fichier TSV."""
+
     def __init__(self, entries: dict[str, str], source: Path) -> None:
+        """Initialise le lexique.
+
+        Args:
+            entries (dict[str, str]): Dictionnaire ``{mot_normalisé: lemme}``.
+            source (Path): Chemin du fichier source.
+        """
         self.entries = entries
         self.source = source
         self.words = sorted(entries)
 
     @classmethod
     def from_tsv(cls, path: Path) -> "Lexicon":
-        '''Charge un lexique à partir d'un fichier TSV contenant des paires mot<tab>lemme.'''
+        """Charge un lexique depuis un fichier TSV ``mot<TAB>lemme``.
+
+        En cas de lemmes multiples pour un même mot, conserve le plus fréquent.
+
+        Args:
+            path (Path): Chemin du fichier TSV.
+
+        Returns:
+            Lexicon: Instance chargée.
+        """
         lemma_votes: dict[str, Counter[str]] = defaultdict(Counter)
         with path.open("r", encoding="utf-8") as handle:
             for raw_line in handle:
@@ -117,20 +188,28 @@ class Lexicon:
                 if not line or "\t" not in line:
                     continue
                 word, lemma = line.split("\t", maxsplit=1)
-                lemma_votes[normalize(word)][normalize(lemma)] += 1  ## normalize to mas-> min
+                lemma_votes[normalize(word)][normalize(lemma)] += 1
 
         entries = {
-            word: votes.most_common(1)[0][0] # return the most common lemma in votes
+            word: votes.most_common(1)[0][0]
             for word, votes in lemma_votes.items()
             if word
         }
         return cls(entries=entries, source=path)
 
     def contains(self, token: str) -> bool:
+        """Indique si le token normalisé est présent dans le lexique."""
         return normalize(token) in self.entries
 
     def lemma_for(self, token: str) -> str | None:
-        '''Retourne le lemme d'un token s'il est présent dans le lexique, sinon None.'''
+        """Retourne le lemme d'un token s'il est présent dans le lexique.
+
+        Args:
+            token (str): Token à chercher.
+
+        Returns:
+            str | None: Lemme correspondant, ou ``None`` si absent.
+        """
         return self.entries.get(normalize(token))
 
     def generate_candidates(
@@ -140,9 +219,21 @@ class Lexicon:
         seuil_max: int,
         seuil_proximite: float,
     ) -> list[Candidate]:
-        '''Génère une liste de candidats de correction 
-        pour un token donné en fonction de prefixe commun, distance de Levenshtein et seuils.'''
+        """Génère les candidats de correction pour un token hors-lexique.
 
+        Filtre les mots du lexique selon la longueur du préfixe commun,
+        la différence de longueur et la proximité préfixale, puis trie les
+        résultats par distance de Levenshtein croissante.
+
+        Args:
+            token (str): Token à corriger.
+            seuil_min (int): Longueur minimale du préfixe commun.
+            seuil_max (int): Différence maximale de longueur tolérée.
+            seuil_proximite (float): Ratio minimal de proximité préfixale.
+
+        Returns:
+            list[Candidate]: Candidats triés par ``(distance, -prefix_len, mot)``.
+        """
         normalized_token = normalize(token)
         token_length = len(normalized_token)
         if not normalized_token:
@@ -158,7 +249,6 @@ class Lexicon:
                 continue
             if prefix_ratio < seuil_proximite:
                 continue
-
             candidates.append(
                 Candidate(
                     word=word,
@@ -179,15 +269,25 @@ def analyze_query(
     seuil_max: int,
     seuil_proximite: float,
 ) -> list[dict[str, object]]:
-    '''Analyse une requete en validant et corrigeant 
-    les tokens en utilisant un lexique et des seuils de correction.'''
+    """Analyse une requête en validant et corrigeant chaque token via le lexique.
 
-    # tokenisation et lemmatisation
+    Utilise spaCy si disponible pour la tokenisation et la lemmatisation, sinon
+    recourt au patron TOKEN_PATTERN. Pour chaque token : entité reconnue → conservé,
+    présent dans le lexique → validé, absent → candidats de correction générés.
+
+    Args:
+        query (str): Requête saisie par l'utilisateur.
+        lexicon (Lexicon): Lexique de référence.
+        seuil_min (int): Longueur minimale du préfixe commun.
+        seuil_max (int): Différence maximale de longueur tolérée.
+        seuil_proximite (float): Ratio minimal de proximité préfixale.
+
+    Returns:
+        list[dict[str, object]]: Un dictionnaire par token avec les clés
+        ``token``, ``status``, ``correction``, ``lemma``, ``candidates``.
+    """
     spacy_tokens = safe_spacy_tokenize_and_lemmatize(query)
-    if spacy_tokens:
-        tokens = [token for token, _lemma in spacy_tokens]
-    else:
-        tokens = tokenize(query)
+    tokens = [token for token, _lemma in spacy_tokens] if spacy_tokens else tokenize(query)
 
     results: list[dict[str, object]] = []
     for token in tokens:
@@ -196,33 +296,26 @@ def analyze_query(
             continue
 
         if is_specific_entity(token):
-            results.append(
-                {
-                    "token": token,
-                    "status": "entite",
-                    "correction": token,
-                    "lemma": token,
-                    "candidates": [],
-                }
-            )
+            results.append({
+                "token": token,
+                "status": "entite",
+                "correction": token,
+                "lemma": token,
+                "candidates": [],
+            })
             continue
 
-        # Vérification directe dans le lexique
         direct_lemma = lexicon.lemma_for(token)
         if direct_lemma is not None:
-            results.append(
-                {
-                    "token": token,
-                    "status": "valide",
-                    "correction": normalized,
-                    "lemma": direct_lemma,
-                    "candidates": [],
-                }
-            )
+            results.append({
+                "token": token,
+                "status": "valide",
+                "correction": normalized,
+                "lemma": direct_lemma,
+                "candidates": [],
+            })
             continue
 
-        # Si un mot n'est pas dans le lexique et n'est pas une entité spécifique, 
-        # #générer des candidats de correction
         candidates = lexicon.generate_candidates(
             token=token,
             seuil_min=seuil_min,
@@ -231,15 +324,13 @@ def analyze_query(
         )
 
         if not candidates:
-            results.append(
-                {
-                    "token": token,
-                    "status": "introuvable",
-                    "correction": None,
-                    "lemma": None,
-                    "candidates": [],
-                }
-            )
+            results.append({
+                "token": token,
+                "status": "introuvable",
+                "correction": None,
+                "lemma": None,
+                "candidates": [],
+            })
             continue
 
         if len(candidates) == 1:
@@ -247,56 +338,61 @@ def analyze_query(
             status = "corrige-candidat-unique"
         else:
             best_distance = candidates[0].distance
-            best = [candidate for candidate in candidates if candidate.distance == best_distance]
+            best = [c for c in candidates if c.distance == best_distance]
             chosen = sorted(best, key=lambda item: (-item.prefix_len, item.word))[0]
             status = "corrige-levenshtein"
 
-        results.append(
-            {
-                "token": token,
-                "status": status,
-                "correction": chosen.word,
-                "lemma": chosen.lemma,
-                "candidates": [candidate.word for candidate in candidates],
-            }
-        )
+        results.append({
+            "token": token,
+            "status": status,
+            "correction": chosen.word,
+            "lemma": chosen.lemma,
+            "candidates": [c.word for c in candidates],
+        })
 
     return results
 
 
 def format_results(results: Iterable[dict[str, object]]) -> str:
-    '''Formate les résultats en une chaîne de caractères.'''
+    """Formate les résultats d'analyse en une chaîne lisible.
+
+    Args:
+        results (Iterable[dict[str, object]]): Résultats de `analyze_query`.
+
+    Returns:
+        str: Représentation textuelle, un token par ligne.
+    """
     lines = []
     for result in results:
-        token = str(result["token"])
-        status = str(result["status"])
-        correction = result["correction"]
-        lemma = result["lemma"]
-        candidates = result["candidates"]
         lines.append(
-            f"- token={token} | statut={status} | correction={correction} | lemme={lemma} | candidats={candidates}"
+            f"- token={result['token']} | statut={result['status']}"
+            f" | correction={result['correction']} | lemme={result['lemma']}"
+            f" | candidats={result['candidates']}"
         )
     return "\n".join(lines)
 
 
 def main() -> int:
-    # Utiliser le lexique complet par défaut pour les tests
+    """Lance la boucle interactive de correction de requêtes.
+
+    Returns:
+        int: Code de sortie (0 = succès, 1 = lexique introuvable).
+    """
     lexicon_path = DEFAULT_FULL_LEXICON
 
     if not lexicon_path.exists():
-        print(f"Lexique introuvable: {lexicon_path}", file=sys.stderr)
+        print(f"Lexique introuvable : {lexicon_path}", file=sys.stderr)
         return 1
 
     print(f"Chargement du lexique depuis : {lexicon_path}...")
     lexicon = Lexicon.from_tsv(lexicon_path)
 
-    # Paramètres par défaut codés en dur
     seuil_min = 2
     seuil_max = 3
     seuil_proximite = 0.4
 
     while True:
-        query = input("\nSaisissez une requete (ou Entrée pour quitter) : ").strip()
+        query = input("\nSaisissez une requête (ou Entrée pour quitter) : ").strip()
         if not query:
             break
 

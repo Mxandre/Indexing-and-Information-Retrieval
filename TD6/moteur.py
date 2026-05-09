@@ -1,10 +1,23 @@
-import sys
+"""Moteur de recherche booléen/classé pour le corpus LO17.
+
+Charge l'index inverse et le corpus XML filtré, évalue des requêtes en langage
+naturel via le pipeline TD5, résout les bulletins en articles individuels et
+affiche les résultats avec extraits contextuels.
+
+Le modèle de requête repose sur une DNF labellisée (``key_word_groups``) :
+chaque groupe est un dict ``{"title": [...], "content": [...]}`` représentant
+une conjonction de contraintes. Les groupes sont combinés en disjonction (OU).
+Les contraintes ``title`` exigent la présence du terme dans la zone `titre` de
+l'index ; les contraintes ``content`` acceptent titre ou texte.
+"""
+
 import pickle
 import re
+import sys
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
 parent_dir = current_dir.parent
@@ -13,9 +26,6 @@ sys.path.append(str(parent_dir / "TD5"))
 from traitement_requete import (
     normaliser_texte,
     pipeline_traitement_requete,
-    masquer_intervalles_temporels,
-    LOGICAL_OP_PATTERN,
-    extraire_filtres_globaux,
     PICKLE_TF_IDF_FILE,
     PICKLE_ANTI_LIST,
     load_lemmatisatioin_file,
@@ -26,26 +36,27 @@ CORPUS_FILE = parent_dir / "TD3" / "corpus_filtre.xml"
 
 
 def charger_index(filepath: Path) -> dict:
-    """
-    Load the inverse index from a text file.
+    """Charge l'index inverse depuis un fichier texte.
 
-    Format per line: lemma\tentry, entry, ...
-    where each entry is doc_id.zone: freq (e.g., 273.titre: 1, 273.texte: 3)
+    Chaque ligne a le format ``lemme<TAB>entrée, entrée, …`` où chaque entrée
+    est ``doc_id.zone: fréquence`` (ex. ``273.titre: 1, 273.texte: 3``).
 
-    Returns: {lemma: {doc_id: {zone: freq}}}
-    - All keys are strings
-    - freq values are integers
-    - Returns {} if file is missing
+    Args:
+        filepath (Path): Chemin du fichier d'index.
+
+    Returns:
+        dict: Index de structure ``{lemme: {doc_id: {zone: fréquence}}}``.
+        Retourne ``{}`` si le fichier est absent.
     """
     if not filepath.exists():
-        print(f"Warning: Index file not found at {filepath}")
+        print(f"Avertissement : fichier d'index introuvable — {filepath}")
         return {}
 
     index = {}
 
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
+            for line in f:
                 line = line.rstrip("\n")
                 if not line.strip():
                     continue
@@ -63,110 +74,145 @@ def charger_index(filepath: Path) -> dict:
                     entries = [e.strip() for e in entries_str.split(",")]
 
                     doc_dict = defaultdict(dict)
-
                     for entry in entries:
                         if not entry:
                             continue
-
-                        # Parse entry: doc_id.zone: freq
+                        # Format de l'entrée : doc_id.zone: fréquence
                         match = re.match(r"^(\d+)\.(\w+):\s*(\d+)$", entry)
                         if not match:
                             continue
-
                         doc_id = match.group(1)
                         zone = match.group(2)
                         freq = int(match.group(3))
-
                         doc_dict[doc_id][zone] = freq
 
                     if doc_dict:
                         index[lemma] = dict(doc_dict)
 
                 except Exception:
-                    # Skip malformed lines
                     continue
 
     except Exception as e:
-        print(f"Error loading index from {filepath}: {e}")
+        print(f"Erreur lors du chargement de l'index depuis {filepath} : {e}")
         return {}
 
     return index
 
 
-def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, float]:
+MOIS_FR = {
+    "janvier": 1, "février": 2, "mars": 3, "avril": 4,
+    "mai": 5, "juin": 6, "juillet": 7, "août": 8,
+    "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12,
+}
+
+
+def _parse_dmy(s: str) -> datetime | None:
+    """Analyse une chaîne de date au format numérique ou texte français.
+
+    Tente d'abord le format ``%d/%m/%Y``, puis le format texte
+    ``j mois_littéral année`` (ex. ``3 mars 2013``).
+
+    Args:
+        s (str): Chaîne de date à analyser.
+
+    Returns:
+        datetime | None: Objet datetime correspondant, ou ``None`` si non reconnu.
     """
-    Score documents against metadata constraints (keywords, rubrique, date).
+    try:
+        return datetime.strptime(s, "%d/%m/%Y")
+    except ValueError:
+        pass
+    m = re.match(r"(\d{1,2})\s+(\w+)\s+(\d{4})", s.strip(), re.IGNORECASE)
+    if m:
+        month = MOIS_FR.get(m.group(2).lower())
+        if month:
+            try:
+                return datetime(int(m.group(3)), month, int(m.group(1)))
+            except ValueError:
+                pass
+    return None
 
-    Returns {doc_id: score} where score is the sum of keyword contributions.
-    For rubrique/date-only results, score is 0.0.
-    Returns {} if all filters are absent.
 
-    Scoring for keywords:
-      score contribution per keyword per doc = freq_titre * 3 + freq_texte * 1
-    Intersection across ALL keywords is required.
+def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, float]:
+    """Score les documents selon les contraintes de la requête structurée.
 
-    Rubrique and date are AND-filtered on top of keyword results.
+    Applique la DNF labellisée (``key_word_groups``) puis filtre par rubrique
+    et/ou date. Le score d'un document est la somme des contributions par
+    groupe (OU) ; au sein d'un groupe, tous les termes doivent être présents
+    (ET). Les termes ``title`` n'acceptent que la zone ``titre`` (x3) ;
+    les termes ``content`` acceptent ``titre`` (x3) ou ``texte`` (x1).
+
+    Args:
+        metadonnees (dict): Résultat de ``pipeline_traitement_requete``.
+        index_inverse (dict): Index inverse chargé.
+
+    Returns:
+        dict[str, float]: Scores ``{doc_id: score}``. Retourne ``{}`` si tous
+        les filtres sont absents.
     """
     keywords = metadonnees.get("key_word", [])
     title_keywords = metadonnees.get("title_keywords", [])
     rubrique = metadonnees.get("rubrique", None)
     date_info = metadonnees.get("date", None)
 
-    # Empty case
     if not keywords and not title_keywords and rubrique is None and date_info is None:
         return {}
 
-    # ------------------------------------------------------------------ #
-    # Step 1: keyword scoring with intersection across all keywords        #
-    # ------------------------------------------------------------------ #
-    keyword_scores: dict[str, float] | None = None  # None = "not filtered yet"
-
-    if keywords:
-        for keyword in keywords:
-            kw_docs = index_inverse.get(keyword, {})
-            # Compute per-doc score for this keyword
-            kw_scores: dict[str, float] = {}
-            for doc_id, zones in kw_docs.items():
-                freq_titre = zones.get("titre", 0)
-                freq_texte = zones.get("texte", 0)
-                kw_scores[doc_id] = freq_titre * 3 + freq_texte * 1
-
-            if keyword_scores is None:
-                keyword_scores = kw_scores
-            else:
-                # Intersection: keep only docs present for ALL keywords, sum scores
-                new_scores: dict[str, float] = {}
-                for doc_id, score in keyword_scores.items():
-                    if doc_id in kw_scores:
-                        new_scores[doc_id] = score + kw_scores[doc_id]
-                keyword_scores = new_scores
-
-        if keyword_scores is None:
-            keyword_scores = {}
-
-    if not keywords and title_keywords:
-        keyword_scores = None
-        for kw in title_keywords:
-            kw_docs = index_inverse.get(kw, {})
-            kw_scores: dict[str, float] = {
-                doc_id: zones.get("titre", 0) * 3
-                for doc_id, zones in kw_docs.items()
-                if zones.get("titre", 0) > 0
-            }
-            if keyword_scores is None:
-                keyword_scores = kw_scores
-            else:
-                new_scores: dict[str, float] = {}
-                for doc_id, score in keyword_scores.items():
-                    if doc_id in kw_scores:
-                        new_scores[doc_id] = score + kw_scores[doc_id]
-                keyword_scores = new_scores
-        if keyword_scores is None:
-            keyword_scores = {}
+    # Construire les groupes DNF ; compatibilité ascendante avec les champs plats
+    key_word_groups = metadonnees.get("key_word_groups")
+    if not key_word_groups and (keywords or title_keywords):
+        key_word_groups = [{"title": list(title_keywords), "content": list(keywords)}]
 
     # ------------------------------------------------------------------ #
-    # Step 2: rubrique filter                                              #
+    # Étape 1 : score par mots-clés — DNF labellisée                      #
+    #   - contrainte title  → zone titre uniquement (score titre × 3)      #
+    #   - contrainte content → titre OU texte (score titre×3 + texte×1)   #
+    #   - ET au sein d'un groupe, OU (somme) entre groupes                 #
     # ------------------------------------------------------------------ #
+    keyword_scores: dict[str, float] | None = None
+
+    if key_word_groups:
+        keyword_scores = {}
+        for group in key_word_groups:
+            g_scores: dict[str, float] | None = None
+
+            for kw in group.get("title", []):
+                kw_docs = index_inverse.get(kw, {})
+                kw_score: dict[str, float] = {
+                    doc_id: zones.get("titre", 0) * 3
+                    for doc_id, zones in kw_docs.items()
+                    if zones.get("titre", 0) > 0
+                }
+                if g_scores is None:
+                    g_scores = kw_score
+                else:
+                    g_scores = {
+                        doc_id: s + kw_score[doc_id]
+                        for doc_id, s in g_scores.items()
+                        if doc_id in kw_score
+                    }
+
+            for kw in group.get("content", []):
+                kw_docs = index_inverse.get(kw, {})
+                kw_score = {
+                    doc_id: zones.get("titre", 0) * 3 + zones.get("texte", 0)
+                    for doc_id, zones in kw_docs.items()
+                }
+                if g_scores is None:
+                    g_scores = kw_score
+                else:
+                    g_scores = {
+                        doc_id: s + kw_score[doc_id]
+                        for doc_id, s in g_scores.items()
+                        if doc_id in kw_score
+                    }
+
+            if g_scores:
+                for doc_id, s in g_scores.items():
+                    keyword_scores[doc_id] = keyword_scores.get(doc_id, 0.0) + s
+
+    
+    # Étape 2 : filtre rubrique                                            
     rubrique_docs: set[str] | None = None
     if rubrique is not None:
         rubrique_lower = rubrique.lower()
@@ -177,20 +223,23 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
         }
         rubrique_docs = set(rub_entries.keys())
 
-    # ------------------------------------------------------------------ #
-    # Step 3: date filter                                                  #
-    # ------------------------------------------------------------------ #
+    
+    # Étape 3 : filtre date                                                
+    
     date_docs: set[str] | None = None
     if date_info is not None:
         dtype = date_info.get("type", "")
 
         if dtype == "dmy":
-            # Exact date lookup (dd/mm/yyyy key exists in index)
             val = date_info.get("value", "")
             date_docs = set(index_inverse.get(val, {}).keys())
+            if not date_docs:
+                dt = _parse_dmy(val)
+                if dt:
+                    date_docs = set(index_inverse.get(dt.strftime("%d/%m/%Y"), {}).keys())
 
         elif dtype == "y":
-            year_val = date_info["value"]  # e.g. "2012"
+            year_val = date_info["value"]
             date_docs = set()
             for key, docs in index_inverse.items():
                 try:
@@ -201,31 +250,37 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
                     pass
 
         elif dtype == "my":
-            my_str = date_info["value"]  # e.g. "09/2012" or "septembre 2012"
+            my_str = date_info["value"]
             date_docs = set()
-            # Try parsing as m/yyyy first
+            target: datetime | None = None
             for fmt in ("%m/%Y", "%m-%Y", "%m %Y"):
                 try:
                     target = datetime.strptime(my_str, fmt)
-                    for key, docs in index_inverse.items():
-                        try:
-                            dt = datetime.strptime(key, "%d/%m/%Y")
-                            if dt.month == target.month and dt.year == target.year:
-                                date_docs.update(docs.keys())
-                        except ValueError:
-                            pass
                     break
                 except ValueError:
                     continue
+            if target is None:
+                # Format texte : « septembre 2012 »
+                m2 = re.match(r"(\w+)\s+(\d{4})", my_str.strip(), re.IGNORECASE)
+                if m2:
+                    month = MOIS_FR.get(m2.group(1).lower())
+                    if month:
+                        try:
+                            target = datetime(int(m2.group(2)), month, 1)
+                        except ValueError:
+                            pass
+            if target is not None:
+                for key, docs in index_inverse.items():
+                    try:
+                        dt = datetime.strptime(key, "%d/%m/%Y")
+                        if dt.month == target.month and dt.year == target.year:
+                            date_docs.update(docs.keys())
+                    except ValueError:
+                        pass
 
         elif dtype == "between_dmy":
-            start_str = date_info.get("start", "")
-            end_str = date_info.get("end", "")
-            try:
-                start_dt = datetime.strptime(start_str, "%d/%m/%Y")
-                end_dt = datetime.strptime(end_str, "%d/%m/%Y")
-            except ValueError:
-                start_dt = end_dt = None
+            start_dt = _parse_dmy(date_info.get("start", ""))
+            end_dt = _parse_dmy(date_info.get("end", ""))
 
             if start_dt is None or end_dt is None:
                 print(f"Avertissement : plage de dates non analysable ({date_info})")
@@ -243,7 +298,6 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
         elif dtype == "between_my":
             start_str = date_info.get("start", "")
             end_str = date_info.get("end", "")
-            # Format: "mm/yyyy"
             try:
                 start_dt = datetime.strptime(start_str, "%m/%Y")
                 end_dt = datetime.strptime(end_str, "%m/%Y")
@@ -280,36 +334,39 @@ def evaluer_metadonnees(metadonnees: dict, index_inverse: dict) -> dict[str, flo
                             date_docs.update(docs.keys())
                     except ValueError:
                         pass
-
-    # ------------------------------------------------------------------ #
-    # Step 4: combine results                                              #
-    # ------------------------------------------------------------------ #
-
+    
+    # Étape 4 : combinaison des résultats                                 
+    
     if keyword_scores is not None:
-        # Start from keyword results, intersect with rubrique and/or date
         result = keyword_scores
         if rubrique_docs is not None:
             result = {doc_id: score for doc_id, score in result.items() if doc_id in rubrique_docs}
         if date_docs is not None:
             result = {doc_id: score for doc_id, score in result.items() if doc_id in date_docs}
         return result
-
     else:
-        # No keywords — combine rubrique and/or date sets with score 0.0
+        # Pas de mots-clés : combiner rubrique et/ou date avec un score nul
         combined: set[str] | None = None
         if rubrique_docs is not None:
             combined = rubrique_docs
         if date_docs is not None:
-            if combined is None:
-                combined = date_docs
-            else:
-                combined = combined & date_docs
+            combined = date_docs if combined is None else combined & date_docs
         if combined is None:
             return {}
         return {doc_id: 0.0 for doc_id in combined}
 
 
 def _soustraire_exclus(docs: dict, key_word_exclu: list, index_inverse: dict) -> dict:
+    """Retire des résultats les documents contenant un mot exclu.
+
+    Args:
+        docs (dict[str, float]): Scores courants ``{doc_id: score}``.
+        key_word_exclu (list[str]): Mots dont la présence exclut un document.
+        index_inverse (dict): Index inverse chargé.
+
+    Returns:
+        dict[str, float]: Scores filtrés.
+    """
     if not key_word_exclu:
         return docs
     exclu_docs: set = set()
@@ -318,63 +375,32 @@ def _soustraire_exclus(docs: dict, key_word_exclu: list, index_inverse: dict) ->
     return {doc_id: score for doc_id, score in docs.items() if doc_id not in exclu_docs}
 
 
-def _filtrer_titre(docs: dict, title_keywords: list, index_inverse: dict) -> dict:
-    if not title_keywords:
-        return docs
-    return {
-        doc_id: score
-        for doc_id, score in docs.items()
-        if all(
-            index_inverse.get(kw, {}).get(doc_id, {}).get("titre", 0) > 0
-            for kw in title_keywords
-        )
-    }
-
-
-def _appliquer_filtres_globaux(doc_ids: set, global_filters: dict, index_inverse: dict) -> set:
-    rubrique = global_filters.get("rubrique")
-    date_info = global_filters.get("date")
-    if not rubrique and not date_info:
-        return doc_ids
-    fake_meta: dict = {}
-    if rubrique:
-        fake_meta["rubrique"] = rubrique
-    if date_info:
-        fake_meta["date"] = date_info
-    filter_set = set(evaluer_metadonnees(fake_meta, index_inverse).keys())
-    return doc_ids & filter_set
-
-
-def _evaluer_recursive(
-    source: str,
+def evaluer_requete_complet(
+    requete_texte: str,
     tf_idf_dict: dict,
     anti_list: list,
     index_inverse: dict,
-) -> set:
-    req_norm = normaliser_texte(source)
-    source_masque = masquer_intervalles_temporels(req_norm)
-    op_match = LOGICAL_OP_PATTERN.search(source_masque)
+) -> tuple[set, dict]:
+    """Exécute le pipeline TD5 puis évalue la requête structurée contre l'index.
 
-    if op_match:
-        left = req_norm[: op_match.start()].strip()
-        right = req_norm[op_match.end() :].strip()
-        op = op_match.group(0).lower().strip()
-        res_left = _evaluer_recursive(left, tf_idf_dict, anti_list, index_inverse)
-        res_right = _evaluer_recursive(right, tf_idf_dict, anti_list, index_inverse)
-        if op == "et":
-            return res_left & res_right
-        elif op == "ou":
-            return res_left | res_right
-        else:  # sans, mais pas, non pas, et non pas
-            return res_left - res_right
+    Les contraintes de zone titre sont appliquées par groupe dans
+    ``evaluer_metadonnees`` (aucun post-filtrage séparé n'est nécessaire).
 
-    # Leaf: process sub-expression through pipeline
-    req_norm_kw, upper_kw = normaliser_texte(source, key_word_traite=True)
-    meta = pipeline_traitement_requete(req_norm_kw, tf_idf_dict, anti_list, upper_kw)
+    Args:
+        requete_texte (str): Requête brute en langage naturel.
+        tf_idf_dict (dict): Scores TF-IDF.
+        anti_list (list): Anti-dictionnaire.
+        index_inverse (dict): Index inverse chargé.
+
+    Returns:
+        tuple[set[str], dict]: Paire ``(doc_ids, meta)`` permettant au
+        code appelant de réutiliser ``meta`` sans relancer le pipeline.
+    """
+    req_norm, upper_kw = normaliser_texte(requete_texte, key_word_traite=True)
+    meta = pipeline_traitement_requete(req_norm, tf_idf_dict, anti_list, upper_kw)
     docs = evaluer_metadonnees(meta, index_inverse)
     docs = _soustraire_exclus(docs, meta.get("key_word_exclu", []), index_inverse)
-    docs = _filtrer_titre(docs, meta.get("title_keywords", []), index_inverse)
-    return set(docs.keys())
+    return set(docs.keys()), meta
 
 
 def evaluer_requete_recursive(
@@ -383,43 +409,37 @@ def evaluer_requete_recursive(
     anti_list: list,
     index_inverse: dict,
 ) -> set:
-    """
-    Evaluate a boolean/ranked query.
+    """Enveloppe rétrocompatible retournant uniquement l'ensemble des doc_id.
 
-    Extracts global filters (rubrique, date, image) first, then evaluates the
-    remaining expression with binary recursion on ET/OU/SANS.
+    Args:
+        requete_texte (str): Requête brute en langage naturel.
+        tf_idf_dict (dict): Scores TF-IDF.
+        anti_list (list): Anti-dictionnaire.
+        index_inverse (dict): Index inverse chargé.
 
-    Returns a set of doc_id strings.
+    Returns:
+        set[str]: Identifiants de bulletins retrouvés.
     """
-    source_stripped, global_filters = extraire_filtres_globaux(requete_texte)
-    doc_ids = _evaluer_recursive(source_stripped, tf_idf_dict, anti_list, index_inverse)
-    return _appliquer_filtres_globaux(doc_ids, global_filters, index_inverse)
+    doc_ids, _ = evaluer_requete_complet(requete_texte, tf_idf_dict, anti_list, index_inverse)
+    return doc_ids
 
 
 def charger_corpus(filepath: Path) -> dict:
-    """
-    Load the corpus from an XML file.
+    """Charge le corpus depuis un fichier XML (groupé par bulletin).
 
-    XML structure:
-    <corpus>
-        <document>
-            <bulletin>273</bulletin>
-            <titre>...</titre>
-            <date>11/09/2012</date>
-            <rubrique>...</rubrique>
-            <texte>...</texte>
-            ...
-        </document>
-        ...
-    </corpus>
+    Structure XML attendue : ``<corpus><document><bulletin>…</bulletin>…</document></corpus>``.
+    Si plusieurs documents partagent le même bulletin, leurs rubriques et textes
+    sont fusionnés.
 
-    Returns: {bulletin_id: {"titre": ..., "date": ..., "rubrique": ..., "texte": ...}}
-    - Keys are document bulletin IDs (strings)
-    - Fields default to "" if missing or None
-    - Returns {} if file is missing
+    Args:
+        filepath (Path): Chemin du fichier XML.
+
+    Returns:
+        dict: Index ``{bulletin_id: {"titre", "date", "rubriques", "texte"}}``.
+        Retourne ``{}`` si le fichier est absent.
     """
     if not filepath.exists():
-        print(f"Warning: Corpus file not found at {filepath}")
+        print(f"Avertissement : fichier corpus introuvable — {filepath}")
         return {}
 
     corpus = {}
@@ -429,27 +449,32 @@ def charger_corpus(filepath: Path) -> dict:
         root = tree.getroot()
 
         for document in root.findall("document"):
-            # Extract bulletin ID
             bulletin_elem = document.find("bulletin")
             if bulletin_elem is None or not bulletin_elem.text:
                 continue
-
             bulletin_id = bulletin_elem.text.strip()
             if not bulletin_id:
                 continue
 
-            # Extract fields
+            titre = ""
             titre_elem = document.find("titre")
-            titre = titre_elem.text.strip() if titre_elem is not None and titre_elem.text else ""
+            if titre_elem is not None and titre_elem.text:
+                titre = titre_elem.text.strip()
 
+            date = ""
             date_elem = document.find("date")
-            date = date_elem.text.strip() if date_elem is not None and date_elem.text else ""
+            if date_elem is not None and date_elem.text:
+                date = date_elem.text.strip()
 
+            rubrique = ""
             rubrique_elem = document.find("rubrique")
-            rubrique = rubrique_elem.text.strip() if rubrique_elem is not None and rubrique_elem.text else ""
+            if rubrique_elem is not None and rubrique_elem.text:
+                rubrique = rubrique_elem.text.strip()
 
+            texte = ""
             texte_elem = document.find("texte")
-            texte = texte_elem.text.strip() if texte_elem is not None and texte_elem.text else ""
+            if texte_elem is not None and texte_elem.text:
+                texte = texte_elem.text.strip()
 
             if bulletin_id in corpus:
                 existing = corpus[bulletin_id]
@@ -466,20 +491,26 @@ def charger_corpus(filepath: Path) -> dict:
                 }
 
     except Exception as e:
-        print(f"Error loading corpus from {filepath}: {e}")
+        print(f"Erreur lors du chargement du corpus depuis {filepath} : {e}")
         return {}
 
     return corpus
 
 
 def charger_corpus_articles(filepath: Path) -> tuple[dict, dict]:
-    """
-    Returns (corpus_articles, bulletin_to_articles).
-    corpus_articles      = {article_id: {article, bulletin, date, rubrique, titre, texte}}
-    bulletin_to_articles = {bulletin_id: [article_id, ...]}  (insertion order)
+    """Charge le corpus et construit l'index article → bulletin.
+
+    Args:
+        filepath (Path): Chemin du fichier XML.
+
+    Returns:
+        tuple[dict, dict]: Paire ``(corpus_articles, bulletin_to_articles)`` où
+        ``corpus_articles`` est ``{article_id: {article, bulletin, date, rubrique,
+        titre, texte}}`` et ``bulletin_to_articles`` est ``{bulletin_id: [article_id, ...]}``.
+        Retourne ``({}, {})`` si le fichier est absent.
     """
     if not filepath.exists():
-        print(f"Warning: Corpus file not found at {filepath}")
+        print(f"Avertissement : fichier corpus introuvable — {filepath}")
         return {}, {}
 
     corpus_articles: dict = {}
@@ -498,7 +529,11 @@ def charger_corpus_articles(filepath: Path) -> tuple[dict, dict]:
                 continue
 
             bulletin_elem = document.find("bulletin")
-            bulletin_id = bulletin_elem.text.strip() if bulletin_elem is not None and bulletin_elem.text else ""
+            bulletin_id = (
+                bulletin_elem.text.strip()
+                if bulletin_elem is not None and bulletin_elem.text
+                else ""
+            )
 
             titre_elem = document.find("titre")
             titre = titre_elem.text.strip() if titre_elem is not None and titre_elem.text else ""
@@ -507,7 +542,11 @@ def charger_corpus_articles(filepath: Path) -> tuple[dict, dict]:
             date = date_elem.text.strip() if date_elem is not None and date_elem.text else ""
 
             rubrique_elem = document.find("rubrique")
-            rubrique = rubrique_elem.text.strip() if rubrique_elem is not None and rubrique_elem.text else ""
+            rubrique = (
+                rubrique_elem.text.strip()
+                if rubrique_elem is not None and rubrique_elem.text
+                else ""
+            )
 
             texte_elem = document.find("texte")
             texte = texte_elem.text.strip() if texte_elem is not None and texte_elem.text else ""
@@ -525,7 +564,7 @@ def charger_corpus_articles(filepath: Path) -> tuple[dict, dict]:
                 bulletin_to_articles.setdefault(bulletin_id, []).append(article_id)
 
     except Exception as e:
-        print(f"Error loading corpus articles from {filepath}: {e}")
+        print(f"Erreur lors du chargement des articles depuis {filepath} : {e}")
         return {}, {}
 
     return corpus_articles, bulletin_to_articles
@@ -539,12 +578,24 @@ def filtrer_articles_pertinents(
     corpus_articles: dict,
     bulletin_to_articles: dict,
 ) -> list[tuple[str, dict, float]]:
-    """
-    Resolve bulletin IDs to individual articles and score by keyword relevance.
+    """Résout les bulletins en articles individuels et les classe par pertinence.
 
-    For each bulletin: score articles by keyword presence in titre (x3) and texte (x1).
-    If rubrique_filter: prefer articles whose rubrique matches; fall back to all if none match.
-    Keep articles with score > 0; if none, keep all selected (trust the index match).
+    Pour chaque bulletin : score les articles par présence des mots-clés dans
+    le titre (×3) et le texte (×1). Si un filtre de rubrique est actif, préfère
+    les articles correspondants (repli sur tous si aucun ne correspond). Ne
+    retient que les articles avec un score > 0 ; repli sur tous si aucun.
+
+    Args:
+        bulletin_ids (set[str]): Bulletins retrouvés par ``evaluer_requete_complet``.
+        keywords (list[str]): Mots-clés de contenu pour le scoring.
+        title_keywords (list[str]): Mots-clés de titre pour le scoring.
+        rubrique_filter (str | None): Rubrique exacte à privilégier.
+        corpus_articles (dict): Articles indexés par ID.
+        bulletin_to_articles (dict): Correspondance bulletin → liste d'articles.
+
+    Returns:
+        list[tuple[str, dict, float]]: Liste de triplets
+        ``(article_id, données_article, score)``.
     """
     results: list[tuple[str, dict, float]] = []
     all_kws = keywords + title_keywords
@@ -571,7 +622,6 @@ def filtrer_articles_pertinents(
                 score += titre_lower.count(kw_l) * 3
             scored.append((article_id, data, score))
 
-        # Apply rubrique filter if set
         if rubrique_filter:
             rubrique_match = [
                 item for item in scored
@@ -581,7 +631,6 @@ def filtrer_articles_pertinents(
         else:
             selected = scored
 
-        # Keep scored articles; fall back to all if none score > 0
         positive = [item for item in selected if item[2] > 0]
         results.extend(positive if positive else selected)
 
@@ -589,19 +638,26 @@ def filtrer_articles_pertinents(
 
 
 def generer_snippets(texte: str, keywords: list, window: int = 40) -> list:
-    """
-    Find ALL occurrences of each keyword in texte and return contextual snippets.
+    """Trouve toutes les occurrences des mots-clés et retourne des extraits contextuels.
 
-    Returns a list of snippet strings with keyword occurrences highlighted in [brackets].
-    Overlapping windows are merged. A fallback of the first 120 chars is returned if
-    no occurrences are found.
+    Les fenêtres se chevauchant sont fusionnées. Les mots-clés sont mis en
+    évidence entre crochets. En l'absence d'occurrence, retourne les 120
+    premiers caractères.
+
+    Args:
+        texte (str): Texte complet de l'article.
+        keywords (list[str]): Mots-clés à repérer.
+        window (int): Nombre de caractères de contexte autour de chaque occurrence.
+
+    Returns:
+        list[str]: Extraits textuels avec mots-clés entre crochets.
     """
     if not keywords or not texte:
         return [texte[:120] + "..."] if texte else []
 
     texte_lower = texte.lower()
 
-    # Step 1: collect all (start, end, kw_found) tuples for each keyword occurrence
+    # Collecte de toutes les occurrences avec leur fenêtre
     occurrences = []
     for kw in keywords:
         kw_lower = kw.lower()
@@ -614,10 +670,9 @@ def generer_snippets(texte: str, keywords: list, window: int = 40) -> list:
     if not occurrences:
         return [texte[:120] + "..."]
 
-    # Step 2: sort by start position
     occurrences.sort(key=lambda x: x[0])
 
-    # Step 3: merge overlapping windows
+    # Fusion des fenêtres qui se chevauchent
     merged = []
     cur_start, cur_end = occurrences[0]
     for start, end in occurrences[1:]:
@@ -628,30 +683,30 @@ def generer_snippets(texte: str, keywords: list, window: int = 40) -> list:
             cur_start, cur_end = start, end
     merged.append((cur_start, cur_end))
 
-    # Step 4: build snippets with bracket highlighting
+    # Construction des extraits avec mise en évidence entre crochets
     snippets = []
     for win_start, win_end in merged:
         chunk = texte[win_start:win_end]
 
-        # Highlight each keyword (case-insensitive, preserve original case)
-        # Collect all match spans on the ORIGINAL chunk first to avoid nested brackets
+        # Collecte de tous les spans de correspondance avant de modifier le chunk
+        # (pour éviter l'imbrication de crochets)
         all_matches = []
-        for kw in set(keywords):  # deduplicate keywords
+        for kw in set(keywords):
             for m in re.finditer(re.escape(kw), chunk, re.IGNORECASE):
                 all_matches.append((m.start(), m.end(), m.group(0)))
         all_matches.sort(key=lambda x: x[0])
+
         result_parts = []
         pos = 0
         for start, end, found in all_matches:
             if start < pos:
-                continue  # skip overlapping match
+                continue  # Ignorer les correspondances qui se chevauchent
             result_parts.append(chunk[pos:start])
             result_parts.append(f"[{found}]")
             pos = end
         result_parts.append(chunk[pos:])
         chunk = "".join(result_parts)
 
-        # Add ellipsis prefix/suffix
         prefix = "..." if win_start > 0 else ""
         suffix = "..." if win_end < len(texte) else ""
         snippets.append(prefix + chunk + suffix)
@@ -664,13 +719,15 @@ def afficher_resultats(
     keywords: list,
     mode: str,
 ) -> None:
-    """
-    Display article-level search results to stdout.
+    """Affiche les résultats de recherche sur la sortie standard.
 
-    Parameters:
-    - article_list: list of (article_id, article_data, score) from filtrer_articles_pertinents
-    - keywords: list of keywords for snippet generation
-    - mode: "classe" (sort by score desc) or "booleen" (sort by date desc)
+    Args:
+        article_list (list[tuple[str, dict, float]]): Triplets
+            ``(article_id, données_article, score)`` issus de
+            ``filtrer_articles_pertinents``.
+        keywords (list[str]): Mots-clés pour la génération des extraits.
+        mode (str): ``"classe"`` (tri par score décroissant) ou ``"booleen"``
+            (tri par date décroissante).
     """
     print(f"\n--- {len(article_list)} résultat(s) trouvé(s) ---\n")
 
@@ -697,8 +754,8 @@ def afficher_resultats(
         rubrique = data.get("rubrique", "")
         texte = data.get("texte", "")
 
-        score_str = f"    score: {score:.1f}" if mode == "classe" else ""
-        print(f"[{i}] Article #{article_id} | Date: {date} | Rubrique: {rubrique}{score_str}")
+        score_str = f"    score : {score:.1f}" if mode == "classe" else ""
+        print(f"[{i}] Article #{article_id} | Date : {date} | Rubrique : {rubrique}{score_str}")
         print(f"    Titre : {titre}")
 
         snips = generer_snippets(texte, keywords)
@@ -712,20 +769,22 @@ def afficher_resultats(
 
 
 def lancer_moteur() -> None:
-    """
-    Main interactive search engine loop.
+    """Lance la boucle interactive du moteur de recherche.
+
+    Commandes disponibles :
+    - ``/mode booleen`` : résultats triés par date décroissante.
+    - ``/mode classe``  : résultats triés par score de pertinence.
+    - ``/quitter``      : quitter le moteur.
     """
     mode = "classe"
     print("================================================")
-    print(f"    MOTEUR DE RECHERCHE — Mode: {mode}")
+    print(f"    MOTEUR DE RECHERCHE — Mode : {mode}")
     print("================================================")
     print("Commandes : /mode booleen | /mode classe | /quitter")
 
-    # Check/generate pickle files
     if not PICKLE_TF_IDF_FILE.exists() or not PICKLE_ANTI_LIST.exists():
         load_lemmatisatioin_file()
 
-    # Load data
     with open(str(PICKLE_TF_IDF_FILE), "rb") as f:
         tf_idf_dict = pickle.load(f)
     with open(str(PICKLE_ANTI_LIST), "rb") as f:
@@ -735,6 +794,8 @@ def lancer_moteur() -> None:
     corpus_articles, bulletin_to_articles = charger_corpus_articles(CORPUS_FILE)
 
     print("Moteur prêt !\n")
+
+    LOGICAL_OPS = {"et", "ou", "sans", "mais", "pas", "non"}
 
     while True:
         try:
@@ -758,20 +819,12 @@ def lancer_moteur() -> None:
             print("Mode : classé")
             continue
 
-        # Evaluate query → bulletin IDs
-        doc_ids = evaluer_requete_recursive(requete, tf_idf_dict, anti_list, index_inverse)
+        doc_ids, meta = evaluer_requete_complet(requete, tf_idf_dict, anti_list, index_inverse)
 
-        # Extract keywords and rubrique for article-level resolution
-        _, global_filters = extraire_filtres_globaux(requete)
-        rubrique_filter = global_filters.get("rubrique")
-
-        req_norm, upper_kw = normaliser_texte(requete, key_word_traite=True)
-        meta = pipeline_traitement_requete(req_norm, tf_idf_dict, anti_list, upper_kw)
-        LOGICAL_OPS = {"et", "ou", "sans", "mais", "pas", "non"}
         keywords = [k for k in meta.get("key_word", []) if k not in LOGICAL_OPS]
         title_keywords = meta.get("title_keywords", [])
+        rubrique_filter = meta.get("rubrique")
 
-        # Resolve bulletins → articles
         article_list = filtrer_articles_pertinents(
             doc_ids, keywords, title_keywords, rubrique_filter,
             corpus_articles, bulletin_to_articles,
