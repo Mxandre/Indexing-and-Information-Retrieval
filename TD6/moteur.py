@@ -397,7 +397,7 @@ def evaluer_requete_complet(
         code appelant de réutiliser ``meta`` sans relancer le pipeline.
     """
     req_norm, upper_kw = normaliser_texte(requete_texte, key_word_traite=True)
-    meta = pipeline_traitement_requete(req_norm, tf_idf_dict, anti_list, upper_kw)
+    meta = pipeline_traitement_requete(req_norm, anti_list, upper_kw)
     docs = evaluer_metadonnees(meta, index_inverse)
     docs = _soustraire_exclus(docs, meta.get("key_word_exclu", []), index_inverse)
     return set(docs.keys()), meta
