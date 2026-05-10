@@ -131,7 +131,7 @@ def safe_spacy_tokenize_and_lemmatize(text: str) -> list[tuple[str, str]]:
         ou liste vide si spaCy est indisponible.
     """
     try:
-        import spacy  # type: ignore
+        import spacy 
 
         nlp = spacy.load("fr_core_news_sm")
     except Exception:
@@ -171,7 +171,7 @@ class Lexicon:
 
     @classmethod
     def from_tsv(cls, path: Path) -> "Lexicon":
-        """Charge un lexique depuis un fichier TSV ``mot<TAB>lemme``.
+        """Charge un lexique depuis un fichier TSV ``mot \tab lemme``.
 
         En cas de lemmes multiples pour un même mot, conserve le plus fréquent.
 

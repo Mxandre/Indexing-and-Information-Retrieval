@@ -4,7 +4,7 @@ Analyse une requête textuelle en français et en extrait une représentation
 structurée : mots-clés (forme DNF labellisée sur titre/contenu), opérateurs
 logiques, filtres de rubrique, filtres de date et contraintes d'images.
 
-Le modèle DNF labellisé (``key_word_groups``) est une liste de groupes, chacun
+Le modèle DNF(Disjunctive Normal Form) labellisé (``key_word_groups``) est une liste de groupes, chacun
 étant un dict ``{"title": [...], "content": [...]}``. Au sein d'un groupe, les
 contraintes sont combinées en ET ; les groupes sont combinés en OU. Les
 contraintes ``title`` ciblent la zone `titre` de l'index inverse ; les
